@@ -1,0 +1,173 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - code-review-agent/**
+      - pyproject.toml
+      - dockerfile
+      - azure-pipelines.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.11'
+  dockerImageName: 'code-review-agent'
+
+stages:
+  - stage: Lint
+    displayName: 'Code Quality Checks'
+    jobs:
+      - job: LintAndFormat
+        displayName: 'Run Linting and Formatting Checks'
+        steps:
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install --upgrade pip
+              pip install -e ".[dev]"
+            displayName: 'Install Dependencies'
+
+          - script: |
+              black --check code_review_agent/
+              ruff check code_review_agent/
+            displayName: 'Run Code Quality Checks'
+            continueOnError: true
+
+  - stage: Test
+    displayName: 'Run Tests'
+    dependsOn: []
+    jobs:
+      - job: RunTests
+        displayName: 'Unit and Integration Tests'
+        steps:
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install --upgrade pip
+              pip install -e ".[dev]"
+            displayName: 'Install Dependencies'
+
+          - script: |
+              pytest tests/ \
+                --cov=code_review_agent \
+                --cov-report=xml \
+                --cov-report=html \
+                --junitxml=test-results.xml \
+                -v
+            displayName: 'Run Tests with Coverage'
+
+          - task: PublishTestResults@2
+            displayName: 'Publish Test Results'
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'test-results.xml'
+              failTaskOnFailedTests: true
+
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publish Coverage Report'
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: 'coverage.xml'
+              pathToSources: 'code_review_agent/'
+
+  - stage: SecurityScan
+    displayName: 'Security Scanning'
+    dependsOn: []
+    jobs:
+      - job: SecurityCheck
+        displayName: 'Run Security Scans'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              pip install --upgrade pip
+              pip install bandit safety
+            displayName: 'Install Security Tools'
+
+          - script: |
+              bandit -r code_review_agent/ -f json -o bandit-report.json || true
+              safety check --json || true
+            displayName: 'Run Security Scans'
+            continueOnError: true
+
+  - stage: Build
+    displayName: 'Build Docker Image'
+    dependsOn:
+      - Test
+      - SecurityScan
+    condition: succeeded()
+    jobs:
+      - job: BuildImage
+        displayName: 'Build and Push Docker Image'
+        steps:
+          - task: Docker@2
+            displayName: 'Build Docker Image'
+            inputs:
+              containerRegistry: 'your-acr-connection'
+              repository: '$(dockerImageName)'
+              command: 'build'
+              Dockerfile: 'dockerfile'
+              tags: |
+                $(Build.BuildId)
+                $(Build.SourceBranchName)
+
+          - task: Docker@2
+            displayName: 'Push Docker Image'
+            inputs:
+              containerRegistry: 'your-acr-connection'
+              repository: '$(dockerImageName)'
+              command: 'push'
+              tags: |
+                $(Build.BuildId)
+                $(Build.SourceBranchName)
+
+  - stage: Deploy
+    displayName: 'Deploy to Azure'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployToProduction
+        displayName: 'Deploy to Azure App Service'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: 'Deploy Container to Azure'
+                  inputs:
+                    azureSubscription: 'your-azure-subscription'
+                    appName: 'code-review-agent-prod'
+                    containers: 'your-acr.azurecr.io/$(dockerImageName):$(Build.BuildId)'
+
+                - task: AzureAppServiceSettings@1
+                  displayName: 'Configure App Settings'
+                  inputs:
+                    azureSubscription: 'your-azure-subscription'
+                    appName: 'code-review-agent-prod'
+                    resourceGroupName: 'your-resource-group'
+                    appSettings: |
+                      [
+                        {
+                          "name": "AZURE_OPENAI_ENDPOINT",
+                          "value": "$(AZURE_OPENAI_ENDPOINT)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "GITHUB_WEBHOOK_SECRET",
+                          "value": "$(GITHUB_WEBHOOK_SECRET)",
+                          "slotSetting": false
+                        }
+                      ]
