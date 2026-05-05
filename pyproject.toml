@@ -45,9 +45,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MunishTanwar/automated-code-review"
-Documentation = "https://github.com/MunishTanwar/automated-code-review#readme"
-Repository = "https://github.com/MunishTanwar/automated-code-review"
+Homepage = "https://github.com/munisht06/automated-code-review-agent"
+Documentation = "https://github.com/munisht06/automated-code-review-agent#readme"
+Repository = "https://github.com/munisht06/automated-code-review-agent"
+Issues = "https://github.com/munisht06/automated-code-review-agent/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
