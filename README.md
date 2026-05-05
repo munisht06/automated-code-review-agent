@@ -1,479 +1,263 @@
 # Automated Code Review Agent
 
-> **AI-Powered Code Review Automation using Azure AI, OpenAI API, and GitHub Webhooks**
-
-An intelligent AI agent that automates the software development lifecycle by providing context-aware code reviews, security scanning, and style optimization through GitHub Pull Request integration.
+> A research prototype for grounded, agentic LLM-based code review on GitHub pull requests.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Azure AI](https://img.shields.io/badge/Azure-AI%20Services-0078D4.svg)](https://azure.microsoft.com/en-us/products/ai-services)
+[![Azure OpenAI](https://img.shields.io/badge/Azure-OpenAI-0078D4.svg)](https://azure.microsoft.com/en-us/products/ai-services)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg)](https://fastapi.tiangolo.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+This repository accompanies an applied study on whether retrieval-augmented, agentic LLM workflows can deliver code review that is consistent, auditable, and grounded enough to be trustworthy in real software-engineering practice. It is an in-progress prototype, not a polished tool.
+
+For a faculty-facing summary of the research framing, see [`RESEARCH.md`](./RESEARCH.md).
+For system design details, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+For evaluation methodology and metrics, see [`EVALUATION.md`](./EVALUATION.md).
 
 ---
 
-## Table of Contents
+## Problem
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [How It Works](#how-it-works)
-- [Advanced Features](#advanced-features)
-- [Development](#development)
-- [Deployment](#deployment)
-- [Contributing](#contributing)
+Manual code review remains the dominant quality gate in software engineering, and it is expensive, latent, and inconsistent. Reviewer attention is uneven across files; team-specific conventions are enforced unevenly across reviewers; junior contributors wait hours or days for feedback that could be available immediately.
 
----
+LLM-based code review is the obvious response, but the obvious approach — hand a diff to a general-purpose model and ask for feedback — fails in two predictable ways. First, the model has no knowledge of team-specific engineering standards, so its feedback drifts toward generic best practices rather than the conventions a particular team has settled on. Second, when the model does not know, it is prone to confidently inventing rationales that sound right but do not correspond to the team's actual rules. Both failure modes degrade trust faster than the speedup buys back.
 
-## Features
+This project asks a narrower, more tractable question: **if a code review agent is grounded in a curated, team-specific standards corpus through retrieval-augmented generation, and structured to separate static-analysis evidence from LLM commentary, can the resulting review output be made consistent and faithful enough to be useful in practice?**
 
-### Core Capabilities
+## Motivation
 
-- **Real-Time GitHub Integration**: Intercepts Pull Request events via webhooks
-- **AI-Powered Analysis**: Leverages Azure OpenAI (GPT-4) for intelligent code review
-- **RAG System**: Retrieval-Augmented Generation with vector embeddings for context-aware guidelines
-- **Security Scanning**: Pattern-based vulnerability detection (SQL injection, XSS, hardcoded secrets, etc.)
-- **Multi-Language Support**: Python, JavaScript/TypeScript, Java, Go, Rust, Ruby, PHP, Swift, Kotlin
-- **Structured Output**: JSON-formatted reviews with severity levels and actionable suggestions
-- **Prompt Engineering**: Advanced prompts to reduce LLM hallucination and ensure guideline adherence
+The system is designed around three working hypotheses, each drawn from current literature and each testable on real PR fixtures:
 
-### Key Differentiators
+1. **Grounding through retrieval reduces hallucination on long-tail conventions.** Generic LLMs have wide but shallow knowledge of style and security guidelines. A RAG pipeline that retrieves over a curated, team-authored corpus should produce review feedback that cites and applies those specific guidelines rather than inventing plausible-sounding alternatives.
+2. **Layered defense beats LLM-only review.** Pattern-based static analysis (regex over a documented catalog of vulnerability classes) and LLM-based reasoning have complementary failure modes. The static layer is high-precision, low-recall, and exhaustively auditable; the LLM layer is the opposite. Composing the two should improve aggregate review quality without compounding their weaknesses.
+3. **Structured output makes reliability measurable.** Forcing the LLM into a typed JSON schema (severity, location, citation, suggestion) turns review quality from a subjective impression into a property that can be benchmarked, ablated, and regressed against.
 
-1. **Hybrid Approach**: Combines static analysis (SecurityScanner) with LLM-based reviews
-2. **Context-Aware**: RAG system retrieves relevant coding standards based on file type and content
-3. **Production-Ready**: Includes Docker containerization, Azure Pipelines CI/CD, and health checks
-4. **Scalable**: Async/await architecture for handling multiple PRs concurrently
+These hypotheses motivate the architecture described below; the [evaluation framework](./EVALUATION.md) describes how each will be tested.
 
----
+## Approach
+
+The system is an event-driven service that listens for GitHub pull-request events, retrieves grounding context for each changed file, runs both a static security pass and a grounded LLM review pass, and posts structured comments back to the PR.
+
+The pipeline is deliberately decomposed into stages so each can be measured and ablated independently:
+
+```text
+PR event  →  HMAC signature verification  →  diff fetch  →  per-file routing
+                                                              │
+                ┌─────────────────────────────────────────────┤
+                ▼                                             ▼
+         Static security pass                          RAG retrieval
+         (regex catalog over                           (embedding-based
+          documented patterns)                          similarity over
+                                                        guidelines corpus)
+                │                                             │
+                └─────────────────────┬───────────────────────┘
+                                      ▼
+                              Prompt orchestration
+                          (system role + retrieved
+                           context + scanner findings
+                           + diff + structured-output
+                           contract)
+                                      ▼
+                                LLM inference
+                                      ▼
+                          JSON review payload
+                                      ▼
+                       Structured PR comments posted
+```
+
+A more detailed component description, including the runtime data flow and the boundary between deterministic and stochastic stages, is in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Architecture
 
-```
-┌─────────────┐         ┌──────────────────┐         ┌─────────────┐
-│   GitHub    │────────>│   FastAPI App    │<───────>│  Azure AI   │
-│  Webhooks   │ webhook │  (main.py)       │  API    │  OpenAI     │
-└─────────────┘         └──────────────────┘         └─────────────┘
-                               │
-                    ┌──────────┼──────────┐
-                    │          │          │
-              ┌─────▼────┐ ┌───▼────┐ ┌──▼────────┐
-              │ GitHub   │ │ Review │ │    RAG    │
-              │ Client   │ │ Engine │ │  System   │
-              └──────────┘ └────────┘ └───────────┘
-                                │
-                        ┌───────┴────────┐
-                        │                │
-                   ┌────▼─────┐   ┌─────▼──────┐
-                   │ Security │   │ Guidelines │
-                   │ Scanner  │   │ Embeddings │
-                   └──────────┘   └────────────┘
+```mermaid
+flowchart LR
+    GH[GitHub<br/>Webhook] -->|PR event| FA[FastAPI<br/>Orchestrator]
+    FA --> GC[GitHubClient<br/>diff + file fetch]
+    FA --> SS[SecurityScanner<br/>static rules]
+    FA --> RAG[RAGSystem<br/>embedding retrieval]
+    RAG --> GLI[(Guidelines<br/>corpus)]
+    SS --> RE[ReviewEngine<br/>prompt + LLM call]
+    RAG --> RE
+    GC --> RE
+    RE --> AOAI[Azure OpenAI<br/>GPT-4]
+    AOAI --> RE
+    RE --> GC
+    GC --> GH
 ```
 
-### Component Overview
+The four core modules under `code_review_agent/`:
 
-| Component | Purpose | Technology |
-|-----------|---------|------------|
-| **FastAPI App** | Webhook receiver & orchestrator | FastAPI, Uvicorn |
-| **ReviewEngine** | LLM-based code analysis | Azure OpenAI GPT-4 |
-| **RAGSystem** | Context retrieval from guidelines | Azure Embeddings, NumPy |
-| **SecurityScanner** | Static security analysis | Regex pattern matching |
-| **GitHubClient** | GitHub API interactions | httpx async client |
+| Module | Responsibility | Determinism |
+|---|---|---|
+| `main.py` | FastAPI app, HMAC webhook verification, event routing, background-task dispatch, per-PR orchestration | Deterministic |
+| `github_client.py` | GitHub REST interactions: PR diff fetch, file content fetch, comment + review submission | Deterministic (modulo network) |
+| `rag_system.py` | Guideline embedding (Azure `text-embedding-ada-002`), cosine-similarity retrieval, language-aware boosting, embedding cache, optional repo-specific guideline overrides via `GuidelineManager` | Deterministic given a fixed embedding model |
+| `review_engine.py` | Prompt construction, LLM invocation, JSON-schema-enforced output, severity assignment; hosts `SecurityScanner` (regex catalog) for the static layer | Stochastic at the LLM call; deterministic everywhere else |
+
+A planned refactor will split `review_engine.py` into separate orchestration / inference / static-scanner modules so each stage is independently testable. See *Future Work*.
+
+## Evaluation
+
+A claim of *applied study* obliges a real evaluation. The [`EVALUATION.md`](./EVALUATION.md) document defines the methodology this repo is being measured against; the [`code_review_agent/evaluation/`](./code_review_agent/evaluation/) package contains a runnable harness skeleton against which results can be reproduced.
+
+The evaluation framework targets four questions:
+
+- **Correctness.** On a held-out fixture set of PR diffs with known-good and known-bad patterns, what fraction of injected issues does the agent surface? What fraction of its findings are false positives?
+- **Grounding fidelity.** When the agent cites a guideline, does the cited guideline actually apply to the code it is commenting on? This is measured on a hand-labeled subset.
+- **RAG ablation.** How much of the agent's correctness depends on retrieval grounding? The harness runs each fixture twice — once with full retrieval, once with retrieval disabled — and compares.
+- **Consistency under repeat.** Run each fixture *N* times. How often does the agent produce the same set of findings? Variance under repeat is a concrete proxy for the reliability claim made in the project's framing.
+
+Numerical results are not yet committed; the harness is in place, and benchmark dataset construction is the active workstream. See [`EVALUATION.md`](./EVALUATION.md) for the experiment design and current status.
+
+## Limitations
+
+This is a research prototype, and the limitations matter as much as the design choices.
+
+- **Retrieval surface is one corpus, not two.** The current RAG layer embeds and retrieves over the curated standards corpus in `guidelines/`. It does not retrieve over the surrounding repository — caller and callee files, related modules, recent commit history. Faculty-grade *code-context retrieval* in the strong sense is on the roadmap, not in `main`.
+- **Static scanner is regex-based.** The `SecurityScanner` covers documented patterns (injection, hardcoded secrets, XSS, command injection, path traversal). It will not catch dataflow-dependent vulnerabilities. This is a deliberate trade-off — auditability over coverage — but it bounds what the system can claim about security review.
+- **Per-file processing is sequential.** Within a single PR, files are reviewed in a serial loop. Concurrency is currently per-PR (FastAPI background tasks dispatching different PRs in parallel). Adding bounded per-file concurrency with explicit rate-limit awareness is a planned change.
+- **No queue or back-pressure.** The system uses FastAPI's in-process `BackgroundTasks` for review work. It is not durable; restarts lose in-flight reviews. A real task queue (Celery, dramatiq, or similar) is required for serious deployment but is out of scope for the prototype.
+- **Single LLM provider.** All experiments use Azure OpenAI. Cross-provider comparison (Anthropic, open-weight models) is a planned ablation but is not implemented.
+- **No human evaluator study.** The evaluation harness measures programmatic properties (correctness on fixtures, grounding citations, repeat consistency). It does not yet measure perceived usefulness from a working engineer's perspective. Designing that study is part of the work.
+- **Single-tenant.** No support for serving multiple repositories or organizations from one deployment. This is fine for a prototype but bounds claims about scale.
+- **Benchmark dataset is small and in-progress.** The fixture set is being built by hand and is not yet large enough to support strong empirical claims. Result tables are placeholders until the dataset is at a defensible size.
+- **Known correctness issue.** When the agent posts inline review comments, the `position` field passed to GitHub's review API is currently the source-file line number rather than the diff position the API expects; in some cases this causes comments to render against the wrong line or be rejected. Tracked as a Phase-1 fix; see [`EVALUATION.md`](./EVALUATION.md) for how this affects fixture-based evaluation today.
+
+## Future Work
+
+Ordered by research interest, not by engineering effort:
+
+- **Code-context retrieval over the repository.** A second retrieval surface that, given a changed file, fetches the most relevant other files (callers, callees, recently co-changed files) and includes them in the LLM prompt. Closes the strongest gap between current capability and the prototype's framing.
+- **Reliability under sustained operation.** Track whether review quality degrades under load, prompt drift, or model-version churn. This connects the project to the *systems-reliability-for-LLMs* research direction.
+- **Citation faithfulness as a first-class metric.** Beyond "did the agent cite *some* guideline," measure whether the citation actually applies and whether the suggested fix is consistent with the guideline's intent.
+- **Lightweight agentic decomposition.** Replace the single-LLM-call review with a small directed agent: planner that selects which files to look at, retriever that fetches context, reviewer that generates the comment, verifier that checks the comment against the cited guideline. Each stage observable; each ablation possible.
+- **Cross-provider robustness.** Run the same fixture set across multiple LLM providers and measure variance.
 
 ---
 
-## Project Structure
-
-```
-automated-code-review/
-├── code-review-agent/
-│   └── code_review_agent/         # Main package
-│       ├── __init__.py
-│       ├── main.py                # FastAPI app & webhook handler
-│       ├── review_engine.py       # AI review + SecurityScanner
-│       ├── github_client.py       # GitHub API client
-│       └── rag_system.py          # RAG with embeddings
-├── tests/
-│   └── test_review_engine.py     # Unit tests
-├── guidelines/                    # Coding standards (markdown)
-├── pyproject.toml                 # Dependencies & metadata
-├── dockerfile                     # Container definition
-├── azure-pipelines.yml            # CI/CD pipeline
-├── .env                           # Environment variables
-└── README.md                      # This file
-```
-
----
-
-## Installation
+## Reproducibility
 
 ### Prerequisites
 
 - Python 3.10+
-- Azure OpenAI Service access
-- GitHub account with repository admin access
-- Docker (for containerized deployment)
+- An Azure OpenAI resource with a deployed GPT-4 chat model and a deployed `text-embedding-ada-002` embedding model
+- A GitHub account with admin access to the repository the agent will review
+- Docker (only required for containerized deployment)
 
-### Local Development Setup
+### Local setup
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd automated-code-review
+git clone https://github.com/munisht06/automated-code-review-agent.git
+cd automated-code-review-agent
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate          # On Windows: venv\Scripts\activate
 pip install -e ".[dev]"
 
-# Copy environment template
-cp .env.example .env
+cp .env.example .env               # then fill in credentials
 ```
 
----
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the project root:
+### Required environment
 
 ```env
-# Azure OpenAI Configuration
+# Azure OpenAI
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_KEY=your-api-key-here
+AZURE_OPENAI_KEY=your-api-key
 AZURE_OPENAI_DEPLOYMENT=gpt-4
 AZURE_EMBEDDING_DEPLOYMENT=text-embedding-ada-002
 
-# GitHub Configuration
-GITHUB_TOKEN=ghp_your-github-token
+# GitHub
+GITHUB_TOKEN=ghp_your-token            # scopes: repo, write:discussion
 GITHUB_WEBHOOK_SECRET=your-webhook-secret
 ```
 
-### Azure OpenAI Setup
+Pin the model and embedding deployment names you ran experiments against; evaluation results are not portable across model versions. See `.env.example` for guidance.
 
-1. Create an Azure OpenAI resource in Azure Portal
-2. Deploy a GPT-4 model (for code review)
-3. Deploy text-embedding-ada-002 (for RAG embeddings)
-4. Copy endpoint and API key to `.env`
-
-### GitHub Webhook Setup
-
-1. Go to your repository → Settings → Webhooks → Add webhook
-2. Set Payload URL: `https://your-domain.com/webhook/github`
-3. Content type: `application/json`
-4. Secret: (same as `GITHUB_WEBHOOK_SECRET` in `.env`)
-5. Events: Select "Pull requests"
-6. Activate webhook
-
----
-
-## Usage
-
-### Running Locally
+### Running
 
 ```bash
-# Start the server
 uvicorn code_review_agent.main:app --reload --port 8000
-
-# In another terminal, test health endpoint
 curl http://localhost:8000/health
 ```
 
-### Testing with ngrok (for local webhook testing)
+For local webhook testing, expose port 8000 via `ngrok http 8000` and configure the resulting URL as the GitHub webhook target with content type `application/json`, the secret matching `GITHUB_WEBHOOK_SECRET`, and *Pull requests* as the subscribed event.
+
+### Tests
 
 ```bash
-# Install ngrok
-npm install -g ngrok
-
-# Expose local server
-ngrok http 8000
-
-# Use the ngrok URL in GitHub webhook settings
+pytest tests/ -v
+pytest tests/ --cov=code_review_agent --cov-report=html
 ```
 
-### Creating a Pull Request
+### Evaluation harness
 
-Once configured, the agent will automatically:
+```bash
+# Run the evaluation harness against bundled fixtures
+python -m code_review_agent.evaluation.runner --fixtures tests/fixtures/prs --report reports/
+```
 
-1. Receive webhook notification when PR is opened/updated
-2. Fetch PR files and diffs from GitHub
-3. Run security scanner on changed files
-4. Retrieve relevant coding guidelines via RAG
-5. Generate AI-powered review with GPT-4
-6. Post structured comments on the PR
+See [`EVALUATION.md`](./EVALUATION.md) for fixture authoring conventions and metric definitions. The runner currently supports correctness and consistency metrics on hand-labeled fixtures; grounding-fidelity scoring is being added.
 
 ---
 
-## How It Works
+## Project layout
 
-### 1. Webhook Reception
-
-```python
-@app.post("/webhook/github")
-async def github_webhook(request: Request):
-    # Verify signature for security
-    # Parse PR event data
-    # Queue review in background task
 ```
-
-### 2. Security Scanning
-
-The `SecurityScanner` detects:
-
-- **Hardcoded secrets** (passwords, API keys, tokens)
-- **SQL injection** vulnerabilities
-- **Command injection** risks (eval, exec, shell=True)
-- **XSS vulnerabilities** (innerHTML, dangerouslySetInnerHTML)
-- **Path traversal** issues
-
-### 3. RAG-Based Context Retrieval
-
-```python
-# Compute embeddings for query
-query_embedding = await get_embedding(code_snippet)
-
-# Find similar guidelines using cosine similarity
-relevant_guidelines = top_k_similar(query_embedding, guideline_embeddings)
-
-# Include in LLM prompt
+automated-code-review-agent/
+├── code_review_agent/             # Main package
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI app + webhook handler
+│   ├── github_client.py           # GitHub API client
+│   ├── review_engine.py           # LLM review + SecurityScanner
+│   ├── rag_system.py              # Embedding retrieval over guidelines
+│   └── evaluation/                # Evaluation harness (in progress)
+│       ├── __init__.py
+│       ├── runner.py              # End-to-end harness driver
+│       ├── metrics.py             # Correctness, grounding, consistency metrics
+│       └── fixtures.py            # Fixture loading + schema
+├── guidelines/                    # Curated standards corpus (markdown)
+├── tests/
+│   ├── test_review_engine.py      # Unit tests
+│   └── fixtures/prs/              # Evaluation fixtures (in progress)
+├── ARCHITECTURE.md                # System design notes
+├── RESEARCH.md                    # Faculty-facing research brief
+├── EVALUATION.md                  # Evaluation methodology
+├── azure-pipelines.yml            # CI/CD pipeline
+├── Dockerfile                     # Container image
+├── pyproject.toml                 # Package metadata + dependencies
+├── .env.example                   # Environment variable template
+├── LICENSE                        # MIT
+├── CITATION.cff                   # Citation metadata
+└── README.md                      # This file
 ```
-
-### 4. LLM Review Generation
-
-**Prompt Engineering Strategy**:
-
-- **System Prompt**: Defines role, guidelines, output format
-- **User Prompt**: Includes file context, security issues, code diff
-- **Structured Output**: Forces JSON response with schema validation
-- **Temperature 0.1**: Reduces hallucination, increases consistency
-
-### 5. GitHub Comment Posting
-
-```json
-{
-  "body": "## 🤖 AI Code Review Summary\n\n### 🚨 Security Alerts\n- **2 CRITICAL** issues found\n\n### 📝 Review Notes\n- File looks good overall\n- Consider adding type hints",
-  "event": "COMMENT",
-  "comments": [
-    {
-      "path": "src/main.py",
-      "line": 42,
-      "body": "**[CRITICAL] SECURITY**\n\n**Issue:** SQL injection via f-string\n\n**Suggestion:** Use parameterized queries"
-    }
-  ]
-}
-```
-
----
-
-## Advanced Features
-
-### Custom Guidelines
-
-Add custom coding standards in the `guidelines/` directory:
-
-```markdown
-# guidelines/security/api_security.md
-
-## API Security Best Practices
-
-- Always validate JWT tokens on protected endpoints
-- Implement rate limiting (max 100 req/min per user)
-- Use HTTPS for all API communication
-- Log all authentication failures
-```
-
-The RAG system will automatically:
-1. Load and embed the guideline
-2. Retrieve it when reviewing API-related code
-3. Include it in the LLM prompt
-
-### Repository-Specific Guidelines
-
-```python
-from code_review_agent.rag_system import GuidelineManager
-
-manager = GuidelineManager()
-manager.save_repo_guidelines("owner/repo", [
-    {
-        "title": "Our TypeScript Style",
-        "content": "Always use `const` over `let`...",
-        "language": "typescript"
-    }
-])
-```
-
-### Extending Security Scanner
-
-```python
-# In review_engine.py
-SecurityScanner.PATTERNS["nosql_injection"] = [
-    (r'\$where.*user.*input', "Potential NoSQL injection"),
-    (r'db\.\w+\.find\({.*\+.*}\)', "Unsafe MongoDB query")
-]
-```
-
----
 
 ## Development
 
-### Running Tests
-
 ```bash
-# Run all tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ --cov=code_review_agent --cov-report=html
-
-# Run specific test
-pytest tests/test_review_engine.py::TestSecurityScanner::test_detects_sql_injection
+black code_review_agent/           # Format
+ruff check code_review_agent/      # Lint
+mypy code_review_agent/            # Type check
+pytest tests/                      # Test
 ```
 
-### Code Quality
-
-```bash
-# Format code
-black code-review-agent/code_review_agent/
-
-# Lint
-ruff check code-review-agent/code_review_agent/
-
-# Type checking
-mypy code-review-agent/code_review_agent/
-```
-
-### Pre-commit Hooks
-
-```bash
-# Install pre-commit
-pip install pre-commit
-
-# Setup hooks
-pre-commit install
-
-# Run manually
-pre-commit run --all-files
-```
-
----
+The included `azure-pipelines.yml` runs lint, test, security scan (Bandit, Safety), build, and deploy stages.
 
 ## Deployment
 
-### Docker Deployment
-
-```bash
-# Build image
-docker build -t code-review-agent .
-
-# Run container
-docker run -d \
-  --name code-review-agent \
-  -p 8000:8000 \
-  --env-file .env \
-  code-review-agent
-```
-
-### Azure Container Instances
-
-```bash
-az container create \
-  --resource-group myResourceGroup \
-  --name code-review-agent \
-  --image your-acr.azurecr.io/code-review-agent:latest \
-  --dns-name-label code-review-agent \
-  --ports 8000 \
-  --environment-variables \
-    AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT \
-    AZURE_OPENAI_KEY=$AZURE_OPENAI_KEY
-```
-
-### Azure App Service
-
-The included `azure-pipelines.yml` automates:
-
-1. **Lint Stage**: Code quality checks (black, ruff)
-2. **Test Stage**: Unit tests with coverage reporting
-3. **Security Scan**: Bandit (SAST) + Safety (dependency vulnerabilities)
-4. **Build Stage**: Docker image build and push to ACR
-5. **Deploy Stage**: Deploy to Azure App Service (production environment)
-
----
-
-## Performance & Scalability
-
-### Current Capacity
-
-- **Throughput**: ~10 PRs/minute (with 2 uvicorn workers)
-- **Latency**: 3-8 seconds per file review (depends on file size)
-- **Token Usage**: ~2000-4000 tokens per file
-
-### Optimization Strategies
-
-1. **Caching**: Cache embeddings for guidelines (implemented)
-2. **Batching**: Review multiple files in parallel (async)
-3. **Throttling**: Rate limit GitHub API calls to avoid 429s
-4. **Pruning**: Truncate code snippets to 4000 chars in prompts
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue**: Webhook returns 401 Unauthorized
-- **Solution**: Verify `GITHUB_WEBHOOK_SECRET` matches GitHub settings
-
-**Issue**: Reviews not posting to GitHub
-- **Solution**: Check `GITHUB_TOKEN` has `repo` and `write:discussion` scopes
-
-**Issue**: LLM returns malformed JSON
-- **Solution**: Ensure `response_format={"type": "json_object"}` is set
-
-**Issue**: RAG retrieves irrelevant guidelines
-- **Solution**: Add language-specific boosts in `retrieve_guidelines()`
-
----
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Add tests for new functionality
-4. Ensure all tests pass (`pytest tests/`)
-5. Format code (`black .`)
-6. Commit changes (`git commit -m 'Add amazing feature'`)
-7. Push to branch (`git push origin feature/amazing-feature`)
-8. Open a Pull Request
-
----
+The project ships with a Dockerfile and Azure Pipelines configuration suitable for deployment to Azure Container Instances or Azure App Service. Deployment configuration examples are in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT — see [`LICENSE`](./LICENSE).
 
----
+## Author
 
-## Acknowledgments
+Munish Tanwar — [mtanwar.com](https://mtanwar.com)
 
-- **Azure AI Services**: For providing state-of-the-art LLM capabilities
-- **FastAPI**: For the high-performance async web framework
-- **OpenAI**: For the powerful GPT models and embedding APIs
-- **GitHub**: For the comprehensive webhooks and API
+## Citing or referencing this work
 
----
+If this prototype or its evaluation framework informs your own work, please cite the repository. A `CITATION.cff` is provided.
 
-## Contact & Support
-
-- **Author**: Munish Tanwar
-- **Issues**: Please open an issue on GitHub
-- **Documentation**: See this README and code comments
-
----
-
-**Built with Agentforce orchestration principles | Powered by Azure AI**
+```
+Tanwar, M. (2025). Automated Code Review Agent: a grounded, agentic LLM workflow
+for pull-request review. https://github.com/munisht06/automated-code-review-agent
+```
