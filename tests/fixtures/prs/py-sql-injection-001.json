@@ -1,0 +1,35 @@
+{
+  "fixture_id": "py-sql-injection-001",
+  "language": "python",
+  "description": "PR introduces an f-string SQL query in a user-lookup function. Expected: agent surfaces a CRITICAL security finding for SQL injection via f-string interpolation, cites the security guidelines.",
+  "files": [
+    {
+      "path": "src/users.py",
+      "language": "python",
+      "patch": "@@ -10,6 +10,16 @@\n     pass\n \n+def get_user_by_id(user_id):\n+    \"\"\"Look up a user by ID. NOTE: vulnerable demo.\"\"\"\n+    query = f\"SELECT * FROM users WHERE id = {user_id}\"\n+    cursor = db.cursor()\n+    cursor.execute(query)\n+    return cursor.fetchone()\n+\n+\n",
+      "content": "import db\n\n\ndef _audit_log(user_id, action):\n    pass\n\n\ndef get_user_by_id(user_id):\n    \"\"\"Look up a user by ID. NOTE: vulnerable demo.\"\"\"\n    query = f\"SELECT * FROM users WHERE id = {user_id}\"\n    cursor = db.cursor()\n    cursor.execute(query)\n    return cursor.fetchone()\n\n\ndef get_user_safe(user_id):\n    \"\"\"Parameterized version, included for contrast.\"\"\"\n    cursor = db.cursor()\n    cursor.execute(\"SELECT * FROM users WHERE id = ?\", (user_id,))\n    return cursor.fetchone()\n"
+    }
+  ],
+  "expected_issues": [
+    {
+      "file": "src/users.py",
+      "line": 10,
+      "category": "security",
+      "severity": "CRITICAL",
+      "issue_type": "sql_injection",
+      "must_cite": ["security_best_practices"]
+    }
+  ],
+  "negative_assertions": [
+    {
+      "file": "src/users.py",
+      "category": "style",
+      "rationale": "The patch does not introduce style issues; flagging style here would be a false positive."
+    },
+    {
+      "file": "src/users.py",
+      "category": "security",
+      "rationale": "Note: this negative assertion targets get_user_safe (the parameterized version on line ~17). The agent should NOT flag the parameterized version as vulnerable. Match by line tolerance window."
+    }
+  ]
+}

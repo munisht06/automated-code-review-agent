@@ -51,7 +51,7 @@ Repository = "https://github.com/MunishTanwar/automated-code-review"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["code_review_agent*"]
+include = ["code_review_agent*", "code_review_agent.evaluation*"]
 
 [tool.black]
 line-length = 100
