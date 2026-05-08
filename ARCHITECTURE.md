@@ -121,7 +121,7 @@ The `ReviewEngine` is where the system's only stochastic stage lives. It compose
 The prompt is a system + user pair:
 
 - **System message** establishes the role ("you are a code reviewer for a software team that follows the conventions documented below"), pins the output format to a JSON schema, and includes the retrieved guidelines (truncated per chunk for token efficiency) as authoritative context.
-- **User message** carries the diff, the scanner findings (top 5 by severity), and the file content. Both diff and file content are truncated to fixed character budgets to bound prompt size.
+- **User message** carries the diff, the top 5 scanner findings sorted by severity (CRITICAL → HIGH → MEDIUM → LOW), and the file content. Both diff and file content are truncated to fixed character budgets to bound prompt size.
 
 The LLM is invoked with:
 

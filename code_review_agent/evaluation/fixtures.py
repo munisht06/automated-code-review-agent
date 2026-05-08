@@ -62,10 +62,23 @@ class ExpectedIssue:
 
 @dataclass
 class NegativeAssertion:
-    """A negative assertion: the agent should NOT flag this category here."""
+    """A negative assertion: the agent should NOT flag this category here.
+
+    When ``line`` is set, the assertion is line-scoped: the agent must not
+    flag the given category within ``line_tolerance`` lines of ``line``.
+    When ``line`` is ``None``, the assertion is file-scoped: the agent must
+    not flag the given category anywhere in the file.
+
+    Line scoping matters for fixtures that contain both a vulnerable example
+    and a fixed/safe example in the same file -- a category-only negative
+    assertion would otherwise be violated by any same-category finding,
+    including ones that target the genuinely vulnerable example.
+    """
 
     file: str
     category: str
+    line: Optional[int] = None
+    line_tolerance: int = 3
     rationale: str = ""
 
 
@@ -117,6 +130,8 @@ def load_fixture(path: Path | str) -> Fixture:
         NegativeAssertion(
             file=na["file"],
             category=na["category"],
+            line=int(na["line"]) if na.get("line") is not None else None,
+            line_tolerance=int(na.get("line_tolerance", 3)),
             rationale=na.get("rationale", ""),
         )
         for na in data.get("negative_assertions", [])

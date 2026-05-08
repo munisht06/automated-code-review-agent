@@ -45,6 +45,14 @@ DEFAULT_LINE_TOLERANCE = 3
 
 
 @dataclass
+class NegativeAssertionViolation:
+    """A finding that violated a labeled negative assertion."""
+
+    comment: LineComment
+    assertion: NegativeAssertion
+
+
+@dataclass
 class CorrectnessMetrics:
     """Aggregate correctness metrics over a fixture or fixture set."""
 
@@ -56,6 +64,9 @@ class CorrectnessMetrics:
     matched_pairs: List[tuple] = field(default_factory=list)
     unmatched_expected: List[ExpectedIssue] = field(default_factory=list)
     unmatched_findings: List[LineComment] = field(default_factory=list)
+    negative_assertion_violations: List[NegativeAssertionViolation] = field(
+        default_factory=list
+    )
 
     @property
     def precision(self) -> float:
@@ -90,6 +101,16 @@ class CorrectnessMetrics:
             "true_positives": self.true_positives,
             "false_positives": self.false_positives,
             "false_negatives": self.false_negatives,
+            "negative_assertion_violations": [
+                {
+                    "file": v.assertion.file,
+                    "category": v.assertion.category,
+                    "line": v.assertion.line,
+                    "comment_line": v.comment.line,
+                    "rationale": v.assertion.rationale,
+                }
+                for v in self.negative_assertion_violations
+            ],
             "unmatched_expected": [vars(e) for e in self.unmatched_expected],
         }
 
@@ -105,11 +126,20 @@ def compute_correctness(
     Matching rule: an agent finding matches an expected issue iff
         - same file, AND
         - same category, AND
-        - line numbers within `line_tolerance` of each other.
+        - line numbers within ``line_tolerance`` of each other.
 
-    A finding that matches NO expected issue is counted as a false positive,
-    UNLESS it falls under a negative assertion (same file + same category)
-    in which case it is also counted but noted as an explicit policy violation.
+    A finding that matches no expected issue is counted as a false positive.
+    Additionally, every false-positive finding is checked against the
+    fixture's negative assertions; any finding that violates a negative
+    assertion is recorded in ``negative_assertion_violations`` so reports
+    can distinguish "the agent flagged something extra" from "the agent
+    flagged something the fixture explicitly said it should not flag."
+
+    Negative assertions are matched by ``(file, category)``; when an
+    assertion has a ``line`` set, the violation must also be within the
+    assertion's ``line_tolerance`` of that line. Line-scoping lets fixtures
+    express intent like "do not flag the parameterized version on line 18"
+    without forbidding all same-category findings in the file.
     """
     metrics = CorrectnessMetrics()
 
@@ -118,14 +148,14 @@ def compute_correctness(
     for ei in fixture.expected_issues:
         expected_by_file.setdefault(ei.file, []).append(ei)
 
-    # Index negative assertions by (file, category).
-    negatives: dict[tuple[str, str], NegativeAssertion] = {
-        (na.file, na.category): na for na in fixture.negative_assertions
-    }
+    # Group negative assertions by (file, category); multiple line-scoped
+    # assertions with the same category in the same file are allowed.
+    negatives_by_key: dict[tuple[str, str], list[NegativeAssertion]] = {}
+    for na in fixture.negative_assertions:
+        negatives_by_key.setdefault((na.file, na.category), []).append(na)
 
-    matched_expected: set[int] = set()  # ids of matched ExpectedIssue objects
+    matched_expected: set[int] = set()
 
-    # Walk every comment and try to match.
     for result in results:
         for comment in result.line_comments:
             best_match_idx = _find_best_match(
@@ -137,13 +167,19 @@ def compute_correctness(
                 metrics.matched_pairs.append(
                     (comment, fixture.expected_issues[best_match_idx])
                 )
-            else:
-                metrics.false_positives += 1
-                metrics.unmatched_findings.append(comment)
-                # Record negative-assertion violations for the report.
-                key = (result.filename, comment.category)
-                if key in negatives:
-                    metrics.unmatched_findings[-1] = comment  # already there
+                continue
+
+            metrics.false_positives += 1
+            metrics.unmatched_findings.append(comment)
+
+            # Did this finding violate any negative assertion for the file +
+            # category? File-scoped assertions match unconditionally; line-
+            # scoped assertions match only within the assertion's tolerance.
+            for na in negatives_by_key.get((result.filename, comment.category), []):
+                if na.line is None or abs(na.line - comment.line) <= na.line_tolerance:
+                    metrics.negative_assertion_violations.append(
+                        NegativeAssertionViolation(comment=comment, assertion=na)
+                    )
 
     # Anything in expected_issues not matched is a false negative.
     for idx, ei in enumerate(fixture.expected_issues):
@@ -338,3 +374,71 @@ def emit_grounding_tasks(
                 )
             )
     return tasks
+
+
+@dataclass
+class GroundingFidelityMetrics:
+    """Aggregate scores over a set of human-labeled GroundingTask objects.
+
+    These metrics are only meaningful once a human grader has filled in the
+    ``applicable`` and ``specific`` fields on a labeling-task batch. Tasks
+    whose labels are still ``None`` are excluded from each score so that
+    partially labeled batches still produce sensible numbers on the labeled
+    portion.
+    """
+
+    citation_applicability: float = 0.0
+    citation_specificity: float = 0.0
+    citation_rate: float = 0.0
+    n_total_tasks: int = 0
+    n_labeled_applicable: int = 0
+    n_labeled_specific: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "citation_applicability": round(self.citation_applicability, 4),
+            "citation_specificity": round(self.citation_specificity, 4),
+            "citation_rate": round(self.citation_rate, 4),
+            "n_total_tasks": self.n_total_tasks,
+            "n_labeled_applicable": self.n_labeled_applicable,
+            "n_labeled_specific": self.n_labeled_specific,
+        }
+
+
+def aggregate_grounding_labels(tasks: Sequence[GroundingTask]) -> GroundingFidelityMetrics:
+    """Aggregate human-labeled grounding tasks into fidelity scores.
+
+    - ``citation_rate``: fraction of all tasks where the underlying comment
+      cited at least one guideline (structural property; doesn't need labels).
+    - ``citation_applicability``: of the tasks where ``applicable`` is set,
+      the fraction labeled ``True``.
+    - ``citation_specificity``: of the tasks where ``specific`` is set, the
+      fraction labeled ``True``.
+
+    Returns zeroed metrics for fields that have no labeled inputs yet rather
+    than dividing by zero -- partially labeled batches are the common case.
+    """
+    metrics = GroundingFidelityMetrics()
+    if not tasks:
+        return metrics
+
+    metrics.n_total_tasks = len(tasks)
+
+    cited_count = sum(1 for t in tasks if t.cited_guideline_ids)
+    metrics.citation_rate = cited_count / len(tasks)
+
+    labeled_applicable = [t for t in tasks if t.applicable is not None]
+    metrics.n_labeled_applicable = len(labeled_applicable)
+    if labeled_applicable:
+        metrics.citation_applicability = (
+            sum(1 for t in labeled_applicable if t.applicable) / len(labeled_applicable)
+        )
+
+    labeled_specific = [t for t in tasks if t.specific is not None]
+    metrics.n_labeled_specific = len(labeled_specific)
+    if labeled_specific:
+        metrics.citation_specificity = (
+            sum(1 for t in labeled_specific if t.specific) / len(labeled_specific)
+        )
+
+    return metrics

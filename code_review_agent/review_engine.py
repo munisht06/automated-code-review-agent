@@ -224,6 +224,9 @@ You MUST respond with valid JSON in this exact structure:
 
 Be constructive, specific, and actionable. Focus on high-impact issues."""
 
+    # Severity ranking for prompt prioritization (lower number = higher priority).
+    _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
     def _build_user_prompt(
         self,
         filename: str,
@@ -234,8 +237,15 @@ Be constructive, specific, and actionable. Focus on high-impact issues."""
         """Build user prompt with code context and pre-scanned security issues."""
         security_context = ""
         if security_issues:
+            # Prioritize by severity so the prompt's top-5 budget surfaces the most
+            # important findings, not just whatever the regex catalog happened to
+            # match first.
+            sorted_issues = sorted(
+                security_issues,
+                key=lambda i: self._SEVERITY_RANK.get(i.get("severity", "LOW"), 99),
+            )
             security_context = "\n**Pre-identified Security Issues:**\n"
-            for issue in security_issues[:5]:  # Limit to top 5
+            for issue in sorted_issues[:5]:  # Top 5 by severity
                 security_context += f"- Line {issue['line']}: {issue['description']} ({issue['severity']})\n"
 
         return f"""**File:** `{filename}`

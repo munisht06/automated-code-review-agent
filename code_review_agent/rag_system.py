@@ -48,7 +48,7 @@ class RAGSystem:
     async def _load_guidelines(self):
         """Load guidelines from markdown/JSON files."""
         self.guidelines = []
-        
+
         # Load from files if they exist
         if self.guidelines_path.exists():
             for file in self.guidelines_path.glob("**/*.md"):
@@ -58,9 +58,13 @@ class RAGSystem:
                     title=file.stem.replace("_", " ").title(),
                     content=content,
                     language=self._detect_language(file.stem),
-                    category=self._detect_category(file.parent.name)
+                    # Pass both folder name and filename: folder takes precedence
+                    # when guidelines/ has category subfolders, but when files
+                    # live directly under guidelines/ (the common case), the
+                    # filename is what carries the category signal.
+                    category=self._detect_category(file.parent.name, file.stem)
                 ))
-        
+
         # Add default guidelines if none loaded
         if not self.guidelines:
             self.guidelines = self._get_default_guidelines()
@@ -222,10 +226,25 @@ class RAGSystem:
         return None
     
     @staticmethod
-    def _detect_category(folder_name: str) -> str:
-        """Detect guideline category from folder name."""
+    def _detect_category(folder_name: str, filename: str = "") -> str:
+        """Detect guideline category from folder name, falling back to filename.
+
+        When guidelines are organized into category-named subfolders
+        (``guidelines/security/api.md``), the folder name carries the signal.
+        When they live directly under ``guidelines/`` (the current default
+        layout), fall back to substring inference on the filename so we don't
+        label every file ``general``.
+        """
         categories = {"security", "style", "performance", "best-practice"}
-        return folder_name if folder_name in categories else "general"
+        if folder_name in categories:
+            return folder_name
+        name = filename.lower()
+        for cat in categories:
+            if cat in name:
+                return cat
+        if "best_practice" in name or "standards" in name:
+            return "best-practice"
+        return "general"
 
 
 class GuidelineManager:

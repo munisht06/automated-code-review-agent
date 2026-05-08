@@ -135,7 +135,9 @@ These thresholds will be wired into CI once the fixture set is large enough that
 | Correctness metrics | Implemented |
 | Consistency metrics | Implemented |
 | RAG ablation switch | Implemented |
-| Grounding-fidelity scoring | Stubbed; emits labeling tasks rather than scores until human-graded data exists |
+| Grounding-fidelity scoring | Two-stage: harness emits `GroundingTask` objects; `aggregate_grounding_labels` computes citation-applicability and citation-specificity once the tasks are human-labeled. No labeled batch exists yet, so scores are zero by construction until labels are filled in. |
+| Negative-assertion violation tracking | Implemented in `compute_correctness`. Both file-scoped and line-scoped negative assertions are honored. |
+| Citation-ID extraction from LLM output | Not yet structural — current prompt does not force explicit cited-guideline IDs in the JSON response, so `cited_guideline_ids` on each task is empty until the prompt is tightened. |
 | Fixture set | ~1 fixture; building toward 30–50 across Python, TypeScript, and Go |
 | Numerical results | Deliberately not reported until fixture set is at sufficient size |
 

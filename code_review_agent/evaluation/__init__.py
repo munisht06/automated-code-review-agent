@@ -19,9 +19,12 @@ from .metrics import (
     CorrectnessMetrics,
     ConsistencyMetrics,
     GroundingTask,
+    GroundingFidelityMetrics,
+    NegativeAssertionViolation,
     compute_correctness,
     compute_consistency,
     emit_grounding_tasks,
+    aggregate_grounding_labels,
 )
 
 __all__ = [
@@ -33,7 +36,10 @@ __all__ = [
     "CorrectnessMetrics",
     "ConsistencyMetrics",
     "GroundingTask",
+    "GroundingFidelityMetrics",
+    "NegativeAssertionViolation",
     "compute_correctness",
     "compute_consistency",
     "emit_grounding_tasks",
+    "aggregate_grounding_labels",
 ]
