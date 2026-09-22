@@ -2,62 +2,79 @@
 
 This document defines how the Automated Code Review Agent is being measured. It is the methodological complement to [`RESEARCH.md`](./RESEARCH.md): where that document explains *what* is being studied, this one explains *how* the answers will be obtained, and against what evidence.
 
-The evaluation framework is in active development. The harness skeleton lives in [`code_review_agent/evaluation/`](./code_review_agent/evaluation/) and is runnable today; the benchmark dataset is being built by hand and is not yet large enough to support strong empirical claims. Numerical results are explicitly omitted from this document until the dataset is at a defensible size — the methodology is published first so that the results, once they exist, can be assessed against a methodology that is fixed in writing.
+The harness lives in [`code_review_agent/evaluation/`](./code_review_agent/evaluation/). It runs end to end offline with `--mock-llm`, which the tests exercise; the live path uses the same code, and no live run is committed. The benchmark dataset is being built by hand and currently holds one illustrative fixture. No results are reported. The methodology is written down before any results exist, and every change to it is logged below with its date and reason.
 
 ## What is being measured
 
-Four properties, aligned with the three working hypotheses in the README:
+The design has one noise floor, one intervention and two outcome measures. **Consistency under repeat** (§4) is the noise floor: with a stochastic model, a difference between two configurations means nothing until it is larger than the variation between repeat runs of a single configuration, so consistency is measured first. The **RAG ablation** (§3) is the intervention. **Correctness** (§1) and **grounding fidelity** (§2) are the outcome measures.
 
 ### 1. Correctness on labeled fixtures
 
-For each fixture (a PR diff with one or more known issues, plus optional clean baselines), the harness runs the agent end-to-end and computes:
+For each fixture (a PR diff with known issues, or a clean baseline), the harness runs the review engine on every file and scores the model's line comments:
 
-- **Recall** — fraction of injected issues that the agent surfaces (a fixture-injected SQL-injection vulnerability that the agent flags counts as a hit).
-- **Precision** — fraction of agent findings that correspond to a real fixture-labeled issue.
-- **F1** — harmonic mean of precision and recall.
-- **Severity-weighted recall** — recall weighted by the severity of the missed issue. A missed `CRITICAL` security issue costs more than a missed `SUGGESTION`-level style nit.
+- **Recall**: fraction of expected issues matched by a finding.
+- **Precision**: fraction of findings that match an expected issue.
+- **F1**: 2TP / (2TP + FP + FN), the harmonic mean of precision and recall. A run that reports nothing against expected issues scores 0.
+- **Severity-weighted recall**: recall weighted by the severity of each expected issue (CRITICAL 5, HIGH 4, WARNING or MEDIUM 2, SUGGESTION 1), so a missed `CRITICAL` issue costs more than a missed style nit.
 
-Findings are matched to fixture-labeled issues by `(file, line, category)` triples with a configurable line-tolerance window (default ±3 lines) to avoid penalizing the agent for off-by-one disagreements with the fixture.
+A finding matches an expected issue when the file and category agree (case-insensitive) and the lines are within a tolerance window (default ±3, set with `--line-tolerance`). Matching is one-to-one: it pairs as many findings with expected issues as possible, and among such pairings takes the one with the smallest total line distance. Each expected issue can be credited to one finding; a finding eligible only for issues that other findings took counts as a false positive and is reported as a duplicate. A value that is undefined (precision when the agent reports nothing, recall on a fixture with no expected issues) is reported as n/a rather than 0, because a 0 would read as a measured failure.
+
+Every false positive is also checked against the fixture's negative assertions, and violations are listed per run in the JSON report. With `--repeats N`, each rate is reported per run and summarized two ways: as mean, standard deviation, minimum and maximum over the runs where it is defined (with the number of those runs), and as a pooled rate computed once from the counts summed over all runs.
+
+A run in which a review call failed (a network or API error, not a model output) is listed in the report and excluded from every score, and the harness exits with status 3.
+
+Only the model's comments are scored. The static scanner's findings are placed in the prompt but are not counted as agent findings unless the model restates them.
 
 ### 2. Grounding fidelity
 
-When the agent's output cites a guideline (or a static-scanner finding), does the citation actually apply? Three sub-metrics:
+When a comment cites a guideline, does the guideline apply? Guidelines are identified in the prompt by ID, and the model is asked to list the IDs each comment relies on in `cited_guideline_ids`. Citations are self-reported by the model; scanner findings are not counted as citations.
 
-- **Citation rate** — fraction of LLM-generated comments that cite *some* retrieved guideline or scanner finding.
-- **Citation applicability** — on a hand-labeled subset, fraction of citations that human review judges to actually apply to the code being commented on.
-- **Citation specificity** — when multiple guidelines are retrieved, does the cited one correspond to the most relevant retrieved chunk, or does the agent cite arbitrarily?
+- **Citation rate**: fraction of the model's comments that cite at least one guideline ID. Structural; needs no labels. Reported for the reference run (the first run whose review calls all succeeded).
+- **Required-citation checks**: a fixture's expected issue can declare `must_cite` guideline IDs. The harness reports the fraction of such issues whose required guidelines were all retrieved for that file, and, of those matched by a finding, the fraction whose matching comment cited them all. The two rates separate a guideline that never reached the prompt (a retrieval failure) from one that reached the prompt but was not applied (a grounding failure).
+- **Citation applicability**: on a hand-labeled subset, fraction of citations that a human judges to apply to the code being commented on.
+- **Citation specificity**: when several guidelines are retrieved, whether the cited one is the most relevant of them.
 
-Grounding fidelity is the single hardest property to measure cheaply, because applicability requires human judgment. The harness produces a grounding-fidelity report that is structured as a labeling task: pairs of `(comment, cited guideline)` are emitted for human review, and the human-graded outputs are folded back into the metric.
+Applicability and specificity need human judgment, so the harness emits them as a labeling task: one task per comment from the reference run, carrying the comment, the IDs it cites and the IDs retrieved for its file. `aggregate_grounding_labels` folds the graded tasks back into scores; until a batch is labeled, both scores are n/a.
 
 ### 3. RAG ablation
 
-For each fixture, the harness is designed to run the agent in three configurations. The first two are implemented (`--no-rag` toggles retrieval); the third is planned.
+For each fixture, the agent is run in three configurations. The first two are implemented (`--no-rag` switches retrieval off); the third is planned.
 
-- **Full system** — RAG retrieval + scanner + LLM.
-- **No RAG** — scanner + LLM, with the system prompt stripped of retrieved guidelines.
-- **No scanner** *(planned, not yet a runner flag)* — RAG retrieval + LLM, with the static-scanner findings withheld from the prompt.
+- **Full system**: retrieved guidelines + scanner findings + LLM.
+- **No RAG**: scanner findings + LLM; no guidelines are retrieved and the system prompt says none are provided.
+- **No scanner** *(planned, not yet a runner flag)*: retrieved guidelines + LLM, with scanner findings withheld from the prompt.
 
-Cross-configuration comparison gives a direct read on how much of the system's correctness depends on each component.
+Each configuration is one harness invocation, and the ablation compares their reports.
+
+**Known confounds in the current setup.** These limit what the ablation can show today and are listed here so that no result is read past them:
+
+- **Retrieval is not selective yet.** `top_k` is 3 and the bundled corpus holds two guidelines, so the full system receives every guideline for every file. The comparison is all guidelines against none, not selective retrieval against none, and the required-guideline retrieved rate is 1.0 by construction whenever RAG is on.
+- **The scanner is in both arms, and the bundled fixture is scanner-detectable.** The fixture's SQL injection is flagged by the scanner and placed in the prompt with RAG on or off, so this fixture cannot show a retrieval effect on detection. Fixtures whose issues the scanner does not catch are needed.
+- **The corpus is generic.** The bundled guidelines are general best-practice notes that a large model largely knows already. The hypothesis concerns team-specific conventions, which require a team-authored corpus.
+- **The prompt primes security in both arms.** The system prompt's focus list names SQL injection, XSS and hardcoded secrets whether or not guidelines are present.
+- **Mock mode is plumbing only.** Under `--mock-llm` the stand-in echoes the scanner findings and ignores the guidelines, so it behaves like a scanner-only configuration and both arms produce the same correctness and consistency numbers; only the required-guideline retrieved rate differs (1.0 with RAG, 0 without). It checks that the harness runs; it measures nothing about the model.
 
 ### 4. Consistency under repeat
 
-The same fixture run *N* times against the same model deployment with the same prompt produces *N* sets of findings. Variance metrics:
+The same fixture run *N* times against the same deployment with the same prompt produces *N* sets of findings. A finding is a (file, category, line, severity) tuple, and two findings in different runs are the same finding when the file and category agree and the lines are within the same tolerance used for correctness, matched one-to-one as in §1.
 
-- **Set Jaccard** between findings on consecutive runs.
-- **Comment-text edit distance** for findings that match by location across runs.
-- **Severity-class stability** — fraction of repeat runs where the same finding is assigned the same severity.
+- **Pairwise Jaccard**: for every pair of runs, matched findings divided by the union (|A| + |B| − matched), averaged over all pairs and reported with its minimum and maximum. Two empty runs score 1.
+- **Severity stability**: of the findings in the first scored run that are matched in every other run (each run matched to the first one-to-one), the fraction assigned the same severity in all of them; n/a when no finding persists across all runs.
+- **Comment-text edit distance** *(planned)*: for findings matched across runs, how much the wording changes.
 
-Variance under repeat is a concrete proxy for the system's *reliability* claim. Temperature is pinned at `0.1` to bias toward reproducibility, but stochasticity remains; this is studyable rather than eliminable.
+A run in which any file's output failed to parse (a recorded parse error and no comments), or any review call failed, is excluded from these metrics and counted, because such a run has no findings and two empty runs would otherwise score as perfectly consistent.
+
+Temperature is pinned at `0.1` to bias toward reproducibility, but stochasticity remains; how much is what this section measures. The per-run correctness summary (§1) gives the same noise floor for the correctness rates.
 
 ## Fixture format
 
-Fixtures live under `tests/fixtures/prs/` and are JSON files with the following schema (a sample is bundled with the repo):
+Fixtures live under `tests/fixtures/prs/` and are JSON files with the following schema (the bundled sample, abbreviated):
 
 ```json
 {
   "fixture_id": "py-sql-injection-001",
   "language": "python",
-  "description": "PR introduces an f-string SQL query in a user-lookup function",
+  "description": "PR introduces an f-string SQL query in a user-lookup function...",
   "files": [
     {
       "path": "src/users.py",
@@ -69,7 +86,7 @@ Fixtures live under `tests/fixtures/prs/` and are JSON files with the following 
   "expected_issues": [
     {
       "file": "src/users.py",
-      "line": 17,
+      "line": 10,
       "category": "security",
       "severity": "CRITICAL",
       "issue_type": "sql_injection",
@@ -79,19 +96,30 @@ Fixtures live under `tests/fixtures/prs/` and are JSON files with the following 
   "negative_assertions": [
     {
       "file": "src/users.py",
-      "category": "style",
-      "rationale": "The patch does not introduce style issues; flagging style here would be a false positive."
+      "category": "security",
+      "line": 18,
+      "line_tolerance": 3,
+      "rationale": "get_user_safe is the parameterized version and is not vulnerable."
     }
   ]
 }
 ```
 
-The schema is enforced by `code_review_agent.evaluation.fixtures.load_fixture`. `expected_issues` are positive assertions ("the agent should surface this"); `negative_assertions` are negative ("the agent should not flag this category in this file").
+`expected_issues` are positive assertions ("the agent should surface this"); `negative_assertions` are negative ("the agent should not flag this category here"). A negative assertion with a `line` is line-scoped: it covers only lines within its `line_tolerance` (default 3). Without a `line` it covers the whole file. Line scoping lets one file hold a vulnerable function and its safe counterpart: in the sample, the SQL injection at line 10 is expected, and a security finding within 3 lines of line 18 (the body of `get_user_safe`, the parameterized version) is a violation.
+
+Fixtures are loaded by `code_review_agent.evaluation.fixtures.load_fixture`, which raises on a missing required field and on a `fixture_id` that is not safe as a file name (report files are named after it). It does not validate other values, such as category names.
 
 ## How to run the harness
 
 ```bash
-# Run the full suite against all fixtures under tests/fixtures/prs/
+# Offline, no credentials: exercises the whole harness with a stand-in for
+# the LLM. Its numbers are not model results.
+python -m code_review_agent.evaluation.runner \
+    --fixtures tests/fixtures/prs \
+    --mock-llm \
+    --report reports/mock/
+
+# Run the suite against Azure OpenAI (credentials in the environment or .env)
 python -m code_review_agent.evaluation.runner \
     --fixtures tests/fixtures/prs \
     --report reports/
@@ -101,7 +129,7 @@ python -m code_review_agent.evaluation.runner \
     --fixture tests/fixtures/prs/py-sql-injection-001.json \
     --report reports/
 
-# RAG ablation
+# RAG ablation (compare with the full-system report)
 python -m code_review_agent.evaluation.runner \
     --fixtures tests/fixtures/prs \
     --no-rag \
@@ -114,43 +142,50 @@ python -m code_review_agent.evaluation.runner \
     --report reports/repeat/
 ```
 
-Reports are written as JSON for downstream analysis and as a human-readable Markdown summary.
+A live run without Azure credentials stops before calling anything, names the missing variables, and exits with status 2. A run in which any review call failed still writes its reports and exits with status 3.
+
+Each run writes a JSON report and a Markdown summary per fixture, plus `summary.md` across fixtures. The JSON report records what produced it (timestamp, git commit and whether tracked files had uncommitted changes, mode, chat and embedding deployment names, API version, temperature, RAG on or off, repeats, line tolerance, top-k, language boost, prompt budgets, corpus source and guideline IDs, Python version) and, for every run and file, the retrieved guideline IDs, any truncated inputs, parse and call errors, the model name the API reported, and the raw model response.
 
 ## What "passing" looks like
 
-The harness does not have a pass/fail gate today. As the dataset matures, the intent is to add regression checks of the form:
+The harness has no pass/fail gate today. Once the fixture set is large enough, the intent is to add regression checks of this form, with thresholds set from the measured run-to-run variation rather than chosen in advance:
 
-- *Recall on the security-injection fixture set must be ≥ 0.85.*
-- *Precision on the clean-code fixture set must be ≥ 0.90.*
-- *Set Jaccard on the consistency suite at N=10 must be ≥ 0.75.*
+- *Recall on the security-injection fixtures at or above a threshold.*
+- *False positives on the clean-code fixtures at or below a threshold.* (A clean fixture has no expected issues, so its precision is either undefined or 0; false-positive counts are the meaningful measure there.)
+- *Mean pairwise Jaccard on the consistency suite at N=10 at or above a threshold.*
 
-These thresholds will be wired into CI once the fixture set is large enough that the thresholds are meaningful rather than noise.
+These checks will be wired into CI once the thresholds would be meaningful rather than noise.
 
 ## Current status
 
 | Stream | Status |
 |---|---|
-| Harness skeleton (`runner.py`, `metrics.py`, `fixtures.py`) | In repo, runnable end-to-end |
-| Sample fixture | One bundled (`tests/fixtures/prs/py-sql-injection-001.json`) — illustrative, not yet a benchmark |
-| Correctness metrics | Implemented |
-| Consistency metrics | Implemented |
-| RAG ablation switch | Implemented |
-| Grounding-fidelity scoring | Two-stage: harness emits `GroundingTask` objects; `aggregate_grounding_labels` computes citation-applicability and citation-specificity once the tasks are human-labeled. No labeled batch exists yet, so scores are zero by construction until labels are filled in. |
-| Negative-assertion violation tracking | Implemented in `compute_correctness`. Both file-scoped and line-scoped negative assertions are honored. |
-| Citation-ID extraction from LLM output | Not yet structural — current prompt does not force explicit cited-guideline IDs in the JSON response, so `cited_guideline_ids` on each task is empty until the prompt is tightened. |
-| Fixture set | ~1 fixture; building toward 30–50 across Python, TypeScript, and Go |
-| Numerical results | Deliberately not reported until fixture set is at sufficient size |
+| Harness (`runner.py`, `metrics.py`, `fixtures.py`) | Runs end to end offline with `--mock-llm` (tested); the live path uses the same code, and no live run is committed |
+| Offline tests | Metrics, parsing, prompt construction, scanner guards, diff-line mapping, webhook handling and the review loop (with stubbed GitHub and engine objects) are tested without credentials |
+| Sample fixture | One bundled (`py-sql-injection-001`): illustrative, scanner-detectable, not a benchmark |
+| Correctness metrics | Implemented, with maximum one-to-one matching, duplicate counting, negative assertions, and per-run, mean and pooled summaries |
+| Consistency metrics | Pairwise Jaccard and severity stability implemented, with parse-failure exclusion; edit distance planned |
+| RAG ablation switch | Implemented (`--no-rag`); scanner-off switch planned |
+| Citation IDs in model output | Requested in the output schema (`cited_guideline_ids`) and parsed; self-reported by the model |
+| Required-citation checks | Implemented (`must_cite` retrieved and cited rates) |
+| Grounding-fidelity labeling | Harness emits labeling tasks with cited and retrieved IDs; `aggregate_grounding_labels` scores them. No labeled batch exists yet, so applicability and specificity are n/a. |
+| Fixture set | One fixture; building toward 30–50 across Python, TypeScript and Go, including clean fixtures and issues the scanner does not detect |
+| Numerical results | None reported |
 
 ## Known issues affecting evaluation today
 
-- **`position` field in `create_pr_review`.** The orchestrator currently passes the source-file line number as the `position` field on inline review comments. GitHub's review API expects a diff position. For programmatic evaluation against fixtures, this does not affect the metrics — the harness operates on the structured `FileReviewResult` before the GitHub-API formatting step — but it does mean live-PR experiments cannot yet be used as evaluation evidence reliably. Tracked as a Phase-1 fix.
-- **Single-language bias.** The bundled sample fixture is Python. Until the fixture set diversifies, claims about cross-language behavior should not be drawn.
-- **Single embedding/model deployment.** All experiments to date are on a single Azure OpenAI configuration. Cross-provider variance is not yet measurable.
+- **Ablation confounds.** See §3: with the bundled corpus and fixture, the ablation cannot yet isolate an effect of selective retrieval.
+- **Single-language bias.** The bundled fixture is Python. Until the fixture set diversifies, no claims about cross-language behavior should be drawn.
+- **Single model configuration.** The harness targets one Azure OpenAI configuration; cross-model and cross-provider variance is not yet measurable.
+- **Self-reported citations.** `cited_guideline_ids` is what the model says it used. Whether a citation applies is established only by the labeling step.
 
 ## Methodology change log
 
-This section will track methodology changes as the framework evolves. Until results are reported, methodology is fluid; once results are in, methodology changes will be versioned and old results will be re-run against the new methodology when feasible.
+Until results are reported, methodology is fluid; once results exist, methodology changes will be versioned and old results re-run against the new methodology when feasible.
 
 | Date | Change | Rationale |
 |---|---|---|
-| 2026-05 | Initial methodology published | First written-down version of the evaluation framework |
+| 2026-05 | Initial methodology written down | First written-down version of the evaluation framework |
+| 2026-05-07 | Scanner findings in the prompt limited to the five highest-severity; line-scoped negative assertions; negative-assertion violations scored in correctness; grounding-label aggregator added | Prompt budget spent on the most severe findings; fixtures can contain a vulnerable and a safe example side by side; labels can be folded back into scores |
+| 2026-09-22 | Per-guideline prompt budget raised from 500 to 4,000 characters; fixture `must_cite` pointed at the guideline ID that loads | The 500-character cap cut the Security section from every bundled guideline |
+| 2026-09-22 | Maximum one-to-one matching with duplicate counting; F1 as 2TP / (2TP + FP + FN); n/a for undefined rates, with defined-run counts and pooled rates; runs with a failed review call excluded from scoring; tolerance-matched consistency with parse-failure exclusion; guideline IDs in the prompt and `cited_guideline_ids` in the output; `must_cite` checks; visible truncation markers and line-numbered file content; language boost fixed; fixture patch regenerated so its hunk matches the file; run metadata and per-file provenance in reports; offline mock mode | Earlier matching let two comments on one issue both count as hits, and averaging F1 only over runs with a defined precision overstated it; consistency required exact line matches, so a one-line shift counted as two different findings, and unparsed runs scored as consistent; citation scoring had no IDs to score; the language boost never applied |
