@@ -5,11 +5,39 @@ coding guidelines and standards to provide context-aware code reviews.
 
 import os
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import numpy as np
 from openai import AsyncAzureOpenAI
+
+logger = logging.getLogger(__name__)
+
+# The bundled corpus lives at the repository root, next to this package.
+# Resolving it relative to the package (rather than the working directory)
+# keeps the corpus the same no matter where the harness is launched from.
+DEFAULT_GUIDELINES_PATH = Path(__file__).resolve().parent.parent / "guidelines"
+
+# Characters of text sent to the embedding model per call.
+MAX_EMBEDDING_INPUT_CHARS = 8000
+# Characters of the file under review used to build the retrieval query.
+RETRIEVAL_QUERY_CHARS = 1000
+# Number of guidelines returned per file. With the bundled two-document
+# corpus this exceeds the corpus size, so every guideline is returned and
+# similarity only determines their order.
+DEFAULT_TOP_K = 3
+# Multiplier applied to the similarity of guidelines whose language matches
+# the file under review.
+LANGUAGE_MATCH_BOOST = 1.3
+
+DEFAULT_AZURE_API_VERSION = "2024-02-15-preview"
+
+
+def azure_api_version() -> str:
+    """The Azure OpenAI API version, read when a client is created (not at
+    import time) so that a value loaded from ``.env`` takes effect."""
+    return os.getenv("AZURE_OPENAI_API_VERSION", DEFAULT_AZURE_API_VERSION)
 
 
 @dataclass
@@ -29,24 +57,36 @@ class RAGSystem:
     Uses vector embeddings to find relevant guidelines for code review context.
     """
     
-    def __init__(self, guidelines_path: str = "guidelines"):
-        self.client = AsyncAzureOpenAI(
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_KEY"),
-            api_version="2024-02-15-preview"
-        )
+    def __init__(self, guidelines_path: Optional[str | Path] = None, client=None):
+        # The Azure client is created lazily on first use, so the class can be
+        # constructed (and its pure helpers tested) without credentials. A
+        # client can also be injected, which is how the offline mock mode of
+        # the evaluation harness works.
+        self._client = client
         self.embedding_model = os.getenv("AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002")
-        self.guidelines_path = Path(guidelines_path)
+        self.guidelines_path = Path(guidelines_path) if guidelines_path else DEFAULT_GUIDELINES_PATH
         self.guidelines: list[GuidelineDocument] = []
         self.embeddings_cache: dict[str, list[float]] = {}
-        
+        # Where the loaded corpus came from, recorded in evaluation reports.
+        self.corpus_source: Optional[str] = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = AsyncAzureOpenAI(
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_key=os.getenv("AZURE_OPENAI_KEY"),
+                api_version=azure_api_version(),
+            )
+        return self._client
+
     async def initialize(self):
         """Load and embed all guidelines documents."""
         await self._load_guidelines()
         await self._compute_embeddings()
     
     async def _load_guidelines(self):
-        """Load guidelines from markdown/JSON files."""
+        """Load guidelines from the markdown files under ``guidelines_path``."""
         self.guidelines = []
 
         # Load from files if they exist
@@ -57,7 +97,7 @@ class RAGSystem:
                     id=file.stem,
                     title=file.stem.replace("_", " ").title(),
                     content=content,
-                    language=self._detect_language(file.stem),
+                    language=self._detect_guideline_language(file.stem),
                     # Pass both folder name and filename: folder takes precedence
                     # when guidelines/ has category subfolders, but when files
                     # live directly under guidelines/ (the common case), the
@@ -65,9 +105,17 @@ class RAGSystem:
                     category=self._detect_category(file.parent.name, file.stem)
                 ))
 
-        # Add default guidelines if none loaded
-        if not self.guidelines:
+        if self.guidelines:
+            self.corpus_source = str(self.guidelines_path)
+        else:
+            # Fall back to the built-in defaults, and say so: a silent swap of
+            # the corpus changes every retrieval-dependent result.
             self.guidelines = self._get_default_guidelines()
+            self.corpus_source = "built-in defaults"
+            logger.warning(
+                "No guideline files found at %s; using built-in default guidelines.",
+                self.guidelines_path,
+            )
     
     def _get_default_guidelines(self) -> list[GuidelineDocument]:
         """Provide sensible default guidelines."""
@@ -158,15 +206,16 @@ class RAGSystem:
         """Get embedding vector for text using Azure OpenAI."""
         response = await self.client.embeddings.create(
             model=self.embedding_model,
-            input=text[:8000]  # Truncate to token limit
+            input=text[:MAX_EMBEDDING_INPUT_CHARS]
         )
-        return response.data[0].embedding
+        embedding: list[float] = response.data[0].embedding
+        return embedding
     
     async def retrieve_guidelines(
         self,
         filename: str,
         code_snippet: str,
-        top_k: int = 3
+        top_k: int = DEFAULT_TOP_K
     ) -> list[GuidelineDocument]:
         """
         Retrieve most relevant guidelines for the given code context.
@@ -178,7 +227,7 @@ class RAGSystem:
         
         # Build query from code context
         language = self._detect_language(filename)
-        query = f"Code review for {language} file: {filename}\n{code_snippet[:1000]}"
+        query = f"Code review for {language} file: {filename}\n{code_snippet[:RETRIEVAL_QUERY_CHARS]}"
         
         # Get query embedding
         query_embedding = await self._get_embedding(query)
@@ -191,7 +240,7 @@ class RAGSystem:
                 
                 # Boost score if language matches
                 if guideline.language and guideline.language == language:
-                    sim *= 1.3
+                    sim *= LANGUAGE_MATCH_BOOST
                 
                 similarities.append((guideline, sim))
         
@@ -225,6 +274,29 @@ class RAGSystem:
                 return lang
         return None
     
+    @staticmethod
+    def _detect_guideline_language(stem: str) -> Optional[str]:
+        """Detect the language a guideline file covers from its file name.
+
+        Guideline files are named for their language (``python_best_practices``,
+        ``typescript_react_standards``) rather than given a source-file
+        extension, so ``_detect_language`` cannot be used on them: it returns
+        ``None`` for every guideline, and the language-match boost never applies.
+        """
+        prefixes = {
+            "python": "python",
+            "typescript": "typescript",
+            "javascript": "javascript",
+            "java": "java",
+            "csharp": "csharp",
+            "go": "go",
+            "golang": "go",
+            "rust": "rust",
+            "ruby": "ruby",
+        }
+        first = stem.lower().split("_")[0].split("-")[0]
+        return prefixes.get(first)
+
     @staticmethod
     def _detect_category(folder_name: str, filename: str = "") -> str:
         """Detect guideline category from folder name, falling back to filename.

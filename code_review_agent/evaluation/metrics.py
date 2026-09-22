@@ -1,26 +1,42 @@
 """
 Metrics for the evaluation harness.
 
-Three metric families mirror the methodology in EVALUATION.md:
+Four metric families mirror the methodology in EVALUATION.md:
 
     correctness  -- precision, recall, F1, severity-weighted recall against
-                    fixture-labeled expected issues.
-    grounding    -- emits (comment, cited_guideline) pairs as labeling tasks
-                    for human grading; aggregates labels into citation
-                    applicability and specificity scores.
-    consistency  -- set Jaccard, comment-text edit distance, and severity-
-                    class stability across N repeat runs of the same fixture.
+                    fixture-labeled expected issues, with one-to-one matching.
+    consistency  -- pairwise set Jaccard and severity stability across N
+                    repeat runs of the same fixture, using the same line
+                    tolerance as correctness.
+    citation     -- structural checks against each expected issue's
+                    ``must_cite`` list: was the guideline retrieved, and did
+                    the matching comment cite it?
+    grounding    -- emits (comment, cited and retrieved guideline IDs) as
+                    labeling tasks for human grading; aggregates labels into
+                    citation applicability and specificity scores.
 
 Metrics operate over the agent's typed FileReviewResult objects and the
 fixture's ExpectedIssue / NegativeAssertion dataclasses; they do NOT depend
-on the live runtime path (no GitHub API, no Azure OpenAI). This decoupling
-is what lets the harness be run reproducibly.
+on the live runtime path (no GitHub API, no Azure OpenAI).
+
+Undefined quantities are reported as ``None`` rather than 0: precision with
+no findings, recall with no expected issues, F1 with neither, severity
+stability with no finding present in every run. A 0 would read as a measured
+failure.
+
+Matching (of findings to expected issues, and of findings across repeat
+runs) is one-to-one and maximum: it pairs as many findings as possible, and
+among pairings of that size it takes the one with the smallest total line
+distance. A greedy closest-first pass is not enough: with expected issues at
+lines 10 and 14 and findings at 8 and 11, greedy pairs 11 with 10 and leaves
+8 unmatched, although 8-10 and 11-14 match both.
 """
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
-from typing import Iterable, List, Sequence
+from typing import List, Optional, Sequence
 
 from code_review_agent.review_engine import FileReviewResult, LineComment
 
@@ -40,8 +56,13 @@ _SEVERITY_WEIGHTS = {
     "SUGGESTION": 1.0,
 }
 
-# Default tolerance window for matching agent comments to expected issues.
+# Default tolerance window for matching agent comments to expected issues,
+# and for matching findings across repeat runs.
 DEFAULT_LINE_TOLERANCE = 3
+
+
+def _norm(category: str) -> str:
+    return (category or "").strip().lower()
 
 
 @dataclass
@@ -54,11 +75,17 @@ class NegativeAssertionViolation:
 
 @dataclass
 class CorrectnessMetrics:
-    """Aggregate correctness metrics over a fixture or fixture set."""
+    """Correctness metrics for one fixture run.
+
+    Matching is one-to-one: each expected issue can be credited to at most
+    one finding. Further findings on an already-matched issue are counted as
+    false positives and also reported as ``duplicate_findings``.
+    """
 
     true_positives: int = 0
     false_positives: int = 0
     false_negatives: int = 0
+    duplicate_findings: int = 0
     severity_weighted_recall_numerator: float = 0.0
     severity_weighted_recall_denominator: float = 0.0
     matched_pairs: List[tuple] = field(default_factory=list)
@@ -69,38 +96,42 @@ class CorrectnessMetrics:
     )
 
     @property
-    def precision(self) -> float:
+    def precision(self) -> Optional[float]:
         denom = self.true_positives + self.false_positives
-        return self.true_positives / denom if denom else 0.0
+        return self.true_positives / denom if denom else None
 
     @property
-    def recall(self) -> float:
+    def recall(self) -> Optional[float]:
         denom = self.true_positives + self.false_negatives
-        return self.true_positives / denom if denom else 0.0
+        return self.true_positives / denom if denom else None
 
     @property
-    def f1(self) -> float:
-        p, r = self.precision, self.recall
-        return 2 * p * r / (p + r) if (p + r) else 0.0
+    def f1(self) -> Optional[float]:
+        # 2TP / (2TP + FP + FN): defined whenever there is anything to score,
+        # so a run that reports nothing against expected issues scores 0
+        # rather than dropping out of the average.
+        denom = 2 * self.true_positives + self.false_positives + self.false_negatives
+        return 2 * self.true_positives / denom if denom else None
 
     @property
-    def severity_weighted_recall(self) -> float:
+    def severity_weighted_recall(self) -> Optional[float]:
+        if not self.severity_weighted_recall_denominator:
+            return None
         return (
             self.severity_weighted_recall_numerator
             / self.severity_weighted_recall_denominator
-            if self.severity_weighted_recall_denominator
-            else 0.0
         )
 
     def to_dict(self) -> dict:
         return {
-            "precision": round(self.precision, 4),
-            "recall": round(self.recall, 4),
-            "f1": round(self.f1, 4),
-            "severity_weighted_recall": round(self.severity_weighted_recall, 4),
+            "precision": _round(self.precision),
+            "recall": _round(self.recall),
+            "f1": _round(self.f1),
+            "severity_weighted_recall": _round(self.severity_weighted_recall),
             "true_positives": self.true_positives,
             "false_positives": self.false_positives,
             "false_negatives": self.false_negatives,
+            "duplicate_findings": self.duplicate_findings,
             "negative_assertion_violations": [
                 {
                     "file": v.assertion.file,
@@ -115,6 +146,78 @@ class CorrectnessMetrics:
         }
 
 
+def _round(x: Optional[float]) -> Optional[float]:
+    return None if x is None else round(x, 4)
+
+
+def _min_cost_assignment(cost: list[list[float]]) -> list[tuple[int, int]]:
+    """Hungarian algorithm for a rectangular cost matrix with rows <= columns.
+
+    Returns (row, column) pairs assigning every row to a distinct column at
+    minimum total cost.
+    """
+    n, m = len(cost), len(cost[0])
+    inf = float("inf")
+    u = [0.0] * (n + 1)
+    v = [0.0] * (m + 1)
+    p = [0] * (m + 1)  # p[j]: row assigned to column j (1-based; 0 = none)
+    way = [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [inf] * (m + 1)
+        used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], inf, 0
+            for j in range(1, m + 1):
+                if not used[j]:
+                    cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j], way[j] = cur, j0
+                    if minv[j] < delta:
+                        delta, j1 = minv[j], j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    return [(p[j] - 1, j - 1) for j in range(1, m + 1) if p[j]]
+
+
+def _max_matching(edges: dict[tuple[int, int], int]) -> list[tuple[int, int]]:
+    """Maximum one-to-one matching over candidate pairs, minimum total distance
+    among maximum matchings.
+
+    ``edges`` maps (left index, right index) to a non-negative distance; only
+    listed pairs may be matched. Non-edges get a cost larger than any possible
+    sum of real distances, so the assignment first maximizes the number of
+    real pairs and then minimizes their total distance.
+    """
+    if not edges:
+        return []
+    left = sorted({i for i, _ in edges})
+    right = sorted({j for _, j in edges})
+    transpose = len(left) > len(right)
+    rows, cols = (right, left) if transpose else (left, right)
+    big = (max(edges.values()) + 1) * (len(rows) + 1)
+
+    def key(r: int, c: int) -> tuple[int, int]:
+        return (c, r) if transpose else (r, c)
+
+    cost = [[float(edges.get(key(r, c), big)) for c in cols] for r in rows]
+    pairs = [key(rows[ri], cols[ci]) for ri, ci in _min_cost_assignment(cost)]
+    return sorted(pair for pair in pairs if pair in edges)
+
+
 def compute_correctness(
     fixture: Fixture,
     results: Sequence[FileReviewResult],
@@ -123,67 +226,65 @@ def compute_correctness(
     """
     Score a single fixture's agent output against its expected issues.
 
-    Matching rule: an agent finding matches an expected issue iff
-        - same file, AND
-        - same category, AND
-        - line numbers within ``line_tolerance`` of each other.
+    A finding can match an expected issue iff they have the same file, the
+    same category (case-insensitive), and line numbers within
+    ``line_tolerance`` of each other. Matching is one-to-one and maximum (see
+    the module docstring): each finding and each expected issue is used at
+    most once.
 
-    A finding that matches no expected issue is counted as a false positive.
-    Additionally, every false-positive finding is checked against the
-    fixture's negative assertions; any finding that violates a negative
-    assertion is recorded in ``negative_assertion_violations`` so reports
-    can distinguish "the agent flagged something extra" from "the agent
-    flagged something the fixture explicitly said it should not flag."
-
-    Negative assertions are matched by ``(file, category)``; when an
-    assertion has a ``line`` set, the violation must also be within the
-    assertion's ``line_tolerance`` of that line. Line-scoping lets fixtures
-    express intent like "do not flag the parameterized version on line 18"
-    without forbidding all same-category findings in the file.
+    A finding that matches no expected issue is a false positive. If it was
+    eligible for an issue that another finding already took, it is also
+    counted in ``duplicate_findings``. Every false positive is checked
+    against the fixture's negative assertions, matched by (file, category)
+    and, for line-scoped assertions, by the assertion's line tolerance.
     """
     metrics = CorrectnessMetrics()
 
-    # Index expected issues by file for fast lookup.
-    expected_by_file: dict[str, list[ExpectedIssue]] = {}
-    for ei in fixture.expected_issues:
-        expected_by_file.setdefault(ei.file, []).append(ei)
+    findings: list[tuple[str, LineComment]] = [
+        (result.filename, comment)
+        for result in results
+        for comment in result.line_comments
+    ]
 
-    # Group negative assertions by (file, category); multiple line-scoped
-    # assertions with the same category in the same file are allowed.
+    edges: dict[tuple[int, int], int] = {}
+    for fi, (fname, comment) in enumerate(findings):
+        for ei_idx, ei in enumerate(fixture.expected_issues):
+            if (
+                ei.file == fname
+                and _norm(ei.category) == _norm(comment.category)
+                and abs(ei.line - comment.line) <= line_tolerance
+            ):
+                edges[(fi, ei_idx)] = abs(ei.line - comment.line)
+
+    finding_to_expected = dict(_max_matching(edges))
+    matched_expected = set(finding_to_expected.values())
+    eligible_findings = {fi for fi, _ in edges}
+
     negatives_by_key: dict[tuple[str, str], list[NegativeAssertion]] = {}
     for na in fixture.negative_assertions:
-        negatives_by_key.setdefault((na.file, na.category), []).append(na)
+        negatives_by_key.setdefault((na.file, _norm(na.category)), []).append(na)
 
-    matched_expected: set[int] = set()
-
-    for result in results:
-        for comment in result.line_comments:
-            best_match_idx = _find_best_match(
-                comment, result.filename, expected_by_file, line_tolerance
+    for fi, (fname, comment) in enumerate(findings):
+        if fi in finding_to_expected:
+            metrics.true_positives += 1
+            metrics.matched_pairs.append(
+                (comment, fixture.expected_issues[finding_to_expected[fi]])
             )
-            if best_match_idx is not None:
-                metrics.true_positives += 1
-                matched_expected.add(best_match_idx)
-                metrics.matched_pairs.append(
-                    (comment, fixture.expected_issues[best_match_idx])
+            continue
+
+        metrics.false_positives += 1
+        metrics.unmatched_findings.append(comment)
+        if fi in eligible_findings:
+            metrics.duplicate_findings += 1
+
+        for na in negatives_by_key.get((fname, _norm(comment.category)), []):
+            if na.line is None or abs(na.line - comment.line) <= na.line_tolerance:
+                metrics.negative_assertion_violations.append(
+                    NegativeAssertionViolation(comment=comment, assertion=na)
                 )
-                continue
 
-            metrics.false_positives += 1
-            metrics.unmatched_findings.append(comment)
-
-            # Did this finding violate any negative assertion for the file +
-            # category? File-scoped assertions match unconditionally; line-
-            # scoped assertions match only within the assertion's tolerance.
-            for na in negatives_by_key.get((result.filename, comment.category), []):
-                if na.line is None or abs(na.line - comment.line) <= na.line_tolerance:
-                    metrics.negative_assertion_violations.append(
-                        NegativeAssertionViolation(comment=comment, assertion=na)
-                    )
-
-    # Anything in expected_issues not matched is a false negative.
     for idx, ei in enumerate(fixture.expected_issues):
-        weight = _SEVERITY_WEIGHTS.get(ei.severity, 1.0)
+        weight = _SEVERITY_WEIGHTS.get((ei.severity or "").upper(), 1.0)
         metrics.severity_weighted_recall_denominator += weight
         if idx in matched_expected:
             metrics.severity_weighted_recall_numerator += weight
@@ -194,41 +295,44 @@ def compute_correctness(
     return metrics
 
 
-def _find_best_match(
-    comment: LineComment,
-    filename: str,
-    expected_by_file: dict,
-    line_tolerance: int,
-) -> int | None:
-    """Return the index of the best matching expected issue, or None."""
-    # Find the nearest expected issue in the same file with the same category.
-    candidates = [
-        (i, ei)
-        for i, ei in enumerate(expected_by_file.get(filename, []))
-        if ei.category == comment.category
-        and abs(ei.line - comment.line) <= line_tolerance
-    ]
-    if not candidates:
-        return None
-    # Prefer the closest by line number.
-    candidates.sort(key=lambda pair: abs(pair[1].line - comment.line))
-    # Resolve back to the global index in the fixture's expected_issues list.
-    # The simple way: scan and identify by identity. For correctness here we
-    # just return the position-in-file index; the caller treats expected_issues
-    # as flat. We need the flat index.
-    # _find_best_match is invoked over expected_by_file which preserved order;
-    # rebuild a flat lookup by identity of the matched object.
-    best = candidates[0][1]
-    # Linear scan to recover flat index. expected_issues is small, this is fine.
-    # The caller passed expected_by_file built from fixture.expected_issues.
-    # We rebuild the flat list once via the dict's preserved insertion order.
-    flat: list = []
-    for fname in expected_by_file:
-        flat.extend(expected_by_file[fname])
-    for i, ei in enumerate(flat):
-        if ei is best:
-            return i
-    return None
+def summarize_correctness(per_run: Sequence[CorrectnessMetrics]) -> dict:
+    """Summarize correctness across repeat runs.
+
+    For each rate: mean, standard deviation, min and max over the runs where
+    it is defined, with ``n_defined`` saying how many that is (precision, for
+    one, is undefined in a run that reports nothing). ``pooled`` gives the
+    rates computed once from the summed counts of all runs, which every run
+    contributes to.
+    """
+    out: dict = {"runs": len(per_run)}
+    for name in ("precision", "recall", "f1", "severity_weighted_recall"):
+        values = [getattr(m, name) for m in per_run]
+        defined = [v for v in values if v is not None]
+        out[name] = {
+            "mean": _round(statistics.fmean(defined)) if defined else None,
+            "stdev": _round(statistics.stdev(defined)) if len(defined) > 1 else None,
+            "min": _round(min(defined)) if defined else None,
+            "max": _round(max(defined)) if defined else None,
+            "n_defined": len(defined),
+            "per_run": [_round(v) for v in values],
+        }
+    pooled = CorrectnessMetrics(
+        true_positives=sum(m.true_positives for m in per_run),
+        false_positives=sum(m.false_positives for m in per_run),
+        false_negatives=sum(m.false_negatives for m in per_run),
+        severity_weighted_recall_numerator=sum(m.severity_weighted_recall_numerator for m in per_run),
+        severity_weighted_recall_denominator=sum(m.severity_weighted_recall_denominator for m in per_run),
+    )
+    out["pooled"] = {
+        "true_positives": pooled.true_positives,
+        "false_positives": pooled.false_positives,
+        "false_negatives": pooled.false_negatives,
+        "precision": _round(pooled.precision),
+        "recall": _round(pooled.recall),
+        "f1": _round(pooled.f1),
+        "severity_weighted_recall": _round(pooled.severity_weighted_recall),
+    }
+    return out
 
 
 # ---- consistency ------------------------------------------------------------
@@ -236,93 +340,186 @@ def _find_best_match(
 
 @dataclass
 class ConsistencyMetrics:
-    """Variance metrics across N repeat runs of the same fixture."""
+    """Variance metrics across N repeat runs of the same fixture.
+
+    Runs are excluded, and counted, when a file's LLM output failed to parse
+    (``excluded_parse_failures``) or its review call failed
+    (``excluded_call_failures``): such a run has no findings, and two empty
+    runs would otherwise score as perfectly consistent.
+    """
 
     runs: int = 0
+    runs_scored: int = 0
+    excluded_parse_failures: int = 0
+    excluded_call_failures: int = 0
+    line_tolerance: int = DEFAULT_LINE_TOLERANCE
     pairwise_jaccard: List[float] = field(default_factory=list)
-    severity_stability: float = 0.0
+    severity_stability: Optional[float] = None
 
     @property
-    def mean_jaccard(self) -> float:
-        return (
-            sum(self.pairwise_jaccard) / len(self.pairwise_jaccard)
-            if self.pairwise_jaccard
-            else 0.0
-        )
+    def mean_jaccard(self) -> Optional[float]:
+        if not self.pairwise_jaccard:
+            return None
+        return sum(self.pairwise_jaccard) / len(self.pairwise_jaccard)
 
     def to_dict(self) -> dict:
         return {
             "runs": self.runs,
-            "mean_jaccard": round(self.mean_jaccard, 4),
-            "min_jaccard": round(min(self.pairwise_jaccard, default=0.0), 4),
-            "max_jaccard": round(max(self.pairwise_jaccard, default=0.0), 4),
-            "severity_stability": round(self.severity_stability, 4),
+            "runs_scored": self.runs_scored,
+            "excluded_parse_failures": self.excluded_parse_failures,
+            "excluded_call_failures": self.excluded_call_failures,
+            "line_tolerance": self.line_tolerance,
+            "mean_jaccard": _round(self.mean_jaccard),
+            "min_jaccard": _round(min(self.pairwise_jaccard)) if self.pairwise_jaccard else None,
+            "max_jaccard": _round(max(self.pairwise_jaccard)) if self.pairwise_jaccard else None,
+            "severity_stability": _round(self.severity_stability),
         }
 
 
 def compute_consistency(
     runs: Sequence[Sequence[FileReviewResult]],
+    line_tolerance: int = DEFAULT_LINE_TOLERANCE,
 ) -> ConsistencyMetrics:
     """
     Score variance across N repeat agent runs over the same fixture input.
 
-    `runs` is a sequence of run-outputs; each run-output is a sequence of
-    FileReviewResult objects.
+    ``runs`` is a sequence of run-outputs; each run-output is a sequence of
+    FileReviewResult objects. Findings are (file, category, line) triples and
+    two findings in different runs are the same finding if file and category
+    agree and lines are within ``line_tolerance``, the same rule correctness
+    uses. Jaccard is averaged over all pairs of scored runs.
     """
-    metrics = ConsistencyMetrics(runs=len(runs))
-    if len(runs) < 2:
+    metrics = ConsistencyMetrics(runs=len(runs), line_tolerance=line_tolerance)
+    scored = []
+    for run in runs:
+        if any(r.call_error for r in run):
+            metrics.excluded_call_failures += 1
+        elif any(r.parse_error and not r.line_comments for r in run):
+            metrics.excluded_parse_failures += 1
+        else:
+            scored.append(run)
+    metrics.runs_scored = len(scored)
+    if len(scored) < 2:
         return metrics
 
-    # Compute pairwise set Jaccard over (file, line, category) triples.
-    finding_sets = [_findings_set(run) for run in runs]
-    for i in range(len(finding_sets)):
-        for j in range(i + 1, len(finding_sets)):
+    finding_lists = [_findings(run) for run in scored]
+    for i in range(len(finding_lists)):
+        for j in range(i + 1, len(finding_lists)):
             metrics.pairwise_jaccard.append(
-                _jaccard(finding_sets[i], finding_sets[j])
+                _tolerant_jaccard(finding_lists[i], finding_lists[j], line_tolerance)
             )
 
-    # Severity stability: for findings present in run 0, what fraction get
-    # the same severity across all subsequent runs?
-    metrics.severity_stability = _severity_stability(runs)
-
+    metrics.severity_stability = _severity_stability(finding_lists, line_tolerance)
     return metrics
 
 
-def _findings_set(run: Iterable[FileReviewResult]) -> set:
-    s = set()
-    for result in run:
-        for c in result.line_comments:
-            s.add((result.filename, c.line, c.category))
-    return s
+def _findings(run: Sequence[FileReviewResult]) -> list[tuple[str, str, int, str]]:
+    return [
+        (result.filename, _norm(c.category), c.line, (c.severity or "").upper())
+        for result in run
+        for c in result.line_comments
+    ]
 
 
-def _jaccard(a: set, b: set) -> float:
+def _match(a: list, b: list, tol: int) -> list[tuple[int, int]]:
+    """One-to-one maximum matching of findings by (file, category, |line| <= tol)."""
+    edges: dict[tuple[int, int], int] = {}
+    for i, (fa, ca, la, _sa) in enumerate(a):
+        for j, (fb, cb, lb, _sb) in enumerate(b):
+            if fa == fb and ca == cb and abs(la - lb) <= tol:
+                edges[(i, j)] = abs(la - lb)
+    return _max_matching(edges)
+
+
+def _tolerant_jaccard(a: list, b: list, tol: int) -> float:
     if not a and not b:
         return 1.0
-    return len(a & b) / len(a | b)
+    m = len(_match(a, b, tol))
+    return m / (len(a) + len(b) - m)
 
 
-def _severity_stability(runs: Sequence[Sequence[FileReviewResult]]) -> float:
-    """For findings that appear in every run, fraction with consistent severity."""
-    by_run: list[dict[tuple, str]] = []
-    for run in runs:
-        sev = {}
-        for result in run:
-            for c in result.line_comments:
-                sev[(result.filename, c.line, c.category)] = c.severity
-        by_run.append(sev)
-
-    common_keys = set(by_run[0].keys())
-    for d in by_run[1:]:
-        common_keys &= set(d.keys())
-    if not common_keys:
-        return 0.0
-
+def _severity_stability(finding_lists: list, tol: int) -> Optional[float]:
+    """Of the findings in the first run that are matched in every other run,
+    the fraction assigned the same severity in all of them. Each other run is
+    matched to the first one-to-one, as in Jaccard. ``None`` if no finding
+    persists across all runs."""
+    base = finding_lists[0]
+    others = finding_lists[1:]
+    matches = [dict(_match(base, other, tol)) for other in others]
+    persistent = 0
     stable = 0
-    for key in common_keys:
-        if len({d[key] for d in by_run}) == 1:
+    for i, finding in enumerate(base):
+        if not all(i in m for m in matches):
+            continue
+        persistent += 1
+        severities = {finding[3]} | {other[m[i]][3] for other, m in zip(others, matches, strict=True)}
+        if len(severities) == 1:
             stable += 1
-    return stable / len(common_keys)
+    return stable / persistent if persistent else None
+
+
+# ---- citation checks against must_cite --------------------------------------
+
+
+@dataclass
+class CitationChecks:
+    """Structural checks of each expected issue's ``must_cite`` guidelines.
+
+    ``retrieved_rate``: over expected issues that declare ``must_cite``, the
+    fraction whose required guidelines were all retrieved for that file.
+    ``cited_rate``: over those expected issues that were matched by a
+    finding, the fraction whose matching comment cited all of them.
+
+    Together they separate two failures the grounding question cares about:
+    a required guideline that never reached the prompt (a retrieval failure)
+    and one that reached the prompt but was not applied (a grounding failure).
+    """
+
+    n_with_must_cite: int = 0
+    n_retrieved: int = 0
+    n_matched: int = 0
+    n_cited: int = 0
+
+    @property
+    def retrieved_rate(self) -> Optional[float]:
+        return self.n_retrieved / self.n_with_must_cite if self.n_with_must_cite else None
+
+    @property
+    def cited_rate(self) -> Optional[float]:
+        return self.n_cited / self.n_matched if self.n_matched else None
+
+    def to_dict(self) -> dict:
+        return {
+            "n_expected_with_must_cite": self.n_with_must_cite,
+            "must_cite_retrieved_rate": _round(self.retrieved_rate),
+            "n_matched_with_must_cite": self.n_matched,
+            "must_cite_cited_rate": _round(self.cited_rate),
+        }
+
+
+def compute_citation_checks(
+    fixture: Fixture,
+    results: Sequence[FileReviewResult],
+    correctness: CorrectnessMetrics,
+) -> CitationChecks:
+    """Check must_cite guidelines against retrieval and citations for one run."""
+    checks = CitationChecks()
+    retrieved_by_file = {r.filename: set(r.retrieved_guideline_ids) for r in results}
+    comment_for_expected = {id(ei): comment for comment, ei in correctness.matched_pairs}
+
+    for ei in fixture.expected_issues:
+        if not ei.must_cite:
+            continue
+        required = set(ei.must_cite)
+        checks.n_with_must_cite += 1
+        if required <= retrieved_by_file.get(ei.file, set()):
+            checks.n_retrieved += 1
+        comment = comment_for_expected.get(id(ei))
+        if comment is not None:
+            checks.n_matched += 1
+            if required <= set(comment.cited_guideline_ids):
+                checks.n_cited += 1
+    return checks
 
 
 # ---- grounding fidelity (labeling-task emission) ----------------------------
@@ -349,19 +546,18 @@ def emit_grounding_tasks(
     retrieved_guideline_ids_per_file: dict[str, List[str]] | None = None,
 ) -> List[GroundingTask]:
     """
-    Emit (comment, citation) pairs for human grading.
+    Emit one labeling task per LLM comment, carrying the guideline IDs the
+    comment cites and the IDs that were retrieved for its file.
 
-    Citations are not currently parsed out of the LLM-generated comment body
-    automatically; this function emits the comment + the *retrieved* guideline
-    IDs and lets the grader judge whether the comment is consistent with any
-    retrieved guideline. Once the prompt is updated to require explicit
-    citation IDs in the JSON output, this function can be tightened to
-    extract cited_guideline_ids structurally.
+    Retrieved IDs come from each FileReviewResult unless overridden by
+    ``retrieved_guideline_ids_per_file``. A grader judges whether each cited
+    guideline applies (``applicable``) and whether it is the most relevant of
+    the retrieved ones (``specific``).
     """
-    retrieved_guideline_ids_per_file = retrieved_guideline_ids_per_file or {}
+    overrides = retrieved_guideline_ids_per_file or {}
     tasks: list[GroundingTask] = []
     for result in results:
-        retrieved = retrieved_guideline_ids_per_file.get(result.filename, [])
+        retrieved = overrides.get(result.filename, result.retrieved_guideline_ids)
         for c in result.line_comments:
             tasks.append(
                 GroundingTask(
@@ -369,7 +565,7 @@ def emit_grounding_tasks(
                     file=result.filename,
                     line=c.line,
                     comment_text=f"[{c.severity}] {c.issue} -- {c.suggestion}",
-                    cited_guideline_ids=[],  # populated once prompt changes
+                    cited_guideline_ids=list(c.cited_guideline_ids),
                     retrieved_guideline_ids=list(retrieved),
                 )
             )
@@ -380,25 +576,23 @@ def emit_grounding_tasks(
 class GroundingFidelityMetrics:
     """Aggregate scores over a set of human-labeled GroundingTask objects.
 
-    These metrics are only meaningful once a human grader has filled in the
-    ``applicable`` and ``specific`` fields on a labeling-task batch. Tasks
-    whose labels are still ``None`` are excluded from each score so that
-    partially labeled batches still produce sensible numbers on the labeled
-    portion.
+    ``citation_rate`` is structural and available without labels.
+    Applicability and specificity are only defined once a grader has filled
+    in the corresponding fields; until then they are ``None``.
     """
 
-    citation_applicability: float = 0.0
-    citation_specificity: float = 0.0
-    citation_rate: float = 0.0
+    citation_applicability: Optional[float] = None
+    citation_specificity: Optional[float] = None
+    citation_rate: Optional[float] = None
     n_total_tasks: int = 0
     n_labeled_applicable: int = 0
     n_labeled_specific: int = 0
 
     def to_dict(self) -> dict:
         return {
-            "citation_applicability": round(self.citation_applicability, 4),
-            "citation_specificity": round(self.citation_specificity, 4),
-            "citation_rate": round(self.citation_rate, 4),
+            "citation_applicability": _round(self.citation_applicability),
+            "citation_specificity": _round(self.citation_specificity),
+            "citation_rate": _round(self.citation_rate),
             "n_total_tasks": self.n_total_tasks,
             "n_labeled_applicable": self.n_labeled_applicable,
             "n_labeled_specific": self.n_labeled_specific,
@@ -406,26 +600,21 @@ class GroundingFidelityMetrics:
 
 
 def aggregate_grounding_labels(tasks: Sequence[GroundingTask]) -> GroundingFidelityMetrics:
-    """Aggregate human-labeled grounding tasks into fidelity scores.
+    """Aggregate grounding tasks into fidelity scores.
 
-    - ``citation_rate``: fraction of all tasks where the underlying comment
-      cited at least one guideline (structural property; doesn't need labels).
+    - ``citation_rate``: fraction of tasks whose comment cited at least one
+      guideline (structural; no labels needed).
     - ``citation_applicability``: of the tasks where ``applicable`` is set,
       the fraction labeled ``True``.
     - ``citation_specificity``: of the tasks where ``specific`` is set, the
       fraction labeled ``True``.
-
-    Returns zeroed metrics for fields that have no labeled inputs yet rather
-    than dividing by zero -- partially labeled batches are the common case.
     """
     metrics = GroundingFidelityMetrics()
     if not tasks:
         return metrics
 
     metrics.n_total_tasks = len(tasks)
-
-    cited_count = sum(1 for t in tasks if t.cited_guideline_ids)
-    metrics.citation_rate = cited_count / len(tasks)
+    metrics.citation_rate = sum(1 for t in tasks if t.cited_guideline_ids) / len(tasks)
 
     labeled_applicable = [t for t in tasks if t.applicable is not None]
     metrics.n_labeled_applicable = len(labeled_applicable)

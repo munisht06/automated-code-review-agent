@@ -50,8 +50,7 @@ def get_user(user_id):
     cursor.execute(query)
 '''
         issues = SecurityScanner.scan(code)
-        # This pattern might not be caught by current regex - that's okay
-        # The test documents expected behavior
+        assert any(i["type"] == "sql_injection" and i["line"] == 3 for i in issues)
 
     def test_detects_command_injection(self):
         code = '''
@@ -276,7 +275,6 @@ class TestReviewEngine:
 
     def test_parse_review_response(self, mock_openai_response):
         engine = ReviewEngine.__new__(ReviewEngine)  # Skip __init__
-        # Fixed: Added third argument (empty security issues list)
         result = engine._parse_review_response("test.py", mock_openai_response, [])
 
         assert isinstance(result, FileReviewResult)
@@ -363,28 +361,11 @@ class TestReviewEngine:
 
 
 # ============================================
-# Integration Tests
+# Webhook helper tests
 # ============================================
 
-class TestWebhookIntegration:
-    """Integration tests for webhook handling."""
-
-    @pytest.fixture
-    def sample_pr_payload(self):
-        return {
-            "action": "opened",
-            "number": 123,
-            "pull_request": {
-                "number": 123,
-                "head": {"sha": "abc123def456"},
-                "title": "Add new feature",
-                "user": {"login": "developer"}
-            },
-            "repository": {
-                "full_name": "owner/repo",
-                "name": "repo"
-            }
-        }
+class TestWebhookHelpers:
+    """Unit tests for the webhook module's helper functions."""
 
     def test_is_reviewable_file_python(self):
         from code_review_agent.main import is_reviewable_file
@@ -455,21 +436,27 @@ class TestWebhookSecurity:
             hashlib.sha256
         ).hexdigest()
 
-        # Mock the env var
-        with patch.dict(os.environ, {"GITHUB_WEBHOOK_SECRET": secret}):
-            # Need to reimport to pick up new env var
-            from code_review_agent import main
-            main.GITHUB_WEBHOOK_SECRET = secret
+        from code_review_agent import main
+        with patch.object(main, "GITHUB_WEBHOOK_SECRET", secret):
             result = main.verify_github_signature(payload, expected_sig)
             assert result is True
 
-    def test_verify_signature_no_secret_dev_mode(self):
-        from code_review_agent.main import verify_github_signature
-        import os
+    def test_verify_signature_no_secret_fails_closed(self, monkeypatch):
+        from code_review_agent import main
+        monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", None)
+        monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", False)
+        # With no secret configured, unsigned requests are rejected...
+        assert main.verify_github_signature(b"payload", "any_sig") is False
 
-        with patch.dict(os.environ, {}, clear=True):
-            from code_review_agent import main
-            main.GITHUB_WEBHOOK_SECRET = None
-            # Should return True in dev mode (no secret set)
-            result = main.verify_github_signature(b"payload", "any_sig")
-            assert result is True
+    def test_verify_signature_no_secret_explicit_dev_mode(self, monkeypatch):
+        from code_review_agent import main
+        monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", None)
+        monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", True)
+        # ...unless unsigned webhooks are explicitly allowed for local development.
+        assert main.verify_github_signature(b"payload", "any_sig") is True
+
+    def test_verify_signature_invalid_rejected(self, monkeypatch):
+        from code_review_agent import main
+        monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", "test_secret_123")
+        assert main.verify_github_signature(b'{"action": "opened"}', "sha256=" + "0" * 64) is False
+        assert main.verify_github_signature(b'{"action": "opened"}', "") is False

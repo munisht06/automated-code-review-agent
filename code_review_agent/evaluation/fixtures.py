@@ -22,7 +22,8 @@ Schema (mirrored in EVALUATION.md):
          "must_cite": ["guideline_id", ...]}
       ],
       "negative_assertions": [
-        {"file": "...", "category": "...", "rationale": "..."}
+        {"file": "...", "category": "...", "rationale": "...",
+         "line": <int, optional>, "line_tolerance": <int, default 3>}
       ]
     }
 """
@@ -30,6 +31,7 @@ Schema (mirrored in EVALUATION.md):
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -98,6 +100,11 @@ class Fixture:
 # ---- loaders ----------------------------------------------------------------
 
 
+# Fixture IDs name report files, so they are limited to characters that are
+# safe in a file name and cannot form a path.
+_FIXTURE_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+
+
 def load_fixture(path: Path | str) -> Fixture:
     """Load a single fixture from a JSON file."""
     p = Path(path)
@@ -137,8 +144,14 @@ def load_fixture(path: Path | str) -> Fixture:
         for na in data.get("negative_assertions", [])
     ]
 
+    fixture_id = data["fixture_id"]
+    if not isinstance(fixture_id, str) or not _FIXTURE_ID.fullmatch(fixture_id):
+        raise ValueError(
+            f"fixture_id {fixture_id!r} in {p} must use only letters, digits, '_', '.' and '-'"
+        )
+
     return Fixture(
-        fixture_id=data["fixture_id"],
+        fixture_id=fixture_id,
         language=data.get("language"),
         description=data.get("description", ""),
         files=files,
@@ -155,7 +168,7 @@ def load_fixture_directory(directory: Path | str) -> List[Fixture]:
     for p in sorted(d.glob("*.json")):
         try:
             fixtures.append(load_fixture(p))
-        except (KeyError, json.JSONDecodeError) as e:
+        except (KeyError, ValueError) as e:  # JSONDecodeError is a ValueError
             # Surface schema problems loudly; do not silently skip.
             raise ValueError(f"Failed to load fixture {p}: {e}") from e
     return fixtures
