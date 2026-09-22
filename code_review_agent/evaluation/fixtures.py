@@ -34,8 +34,6 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
-
 
 # ---- schema dataclasses -----------------------------------------------------
 
@@ -45,7 +43,7 @@ class FixtureFile:
     """A single file within a fixture."""
 
     path: str
-    language: Optional[str]
+    language: str | None
     patch: str
     content: str
 
@@ -58,8 +56,8 @@ class ExpectedIssue:
     line: int
     category: str  # "security" | "style" | "performance" | "bug"
     severity: str  # "CRITICAL" | "WARNING" | "SUGGESTION"
-    issue_type: Optional[str] = None  # finer-grained class, e.g. "sql_injection"
-    must_cite: List[str] = field(default_factory=list)
+    issue_type: str | None = None  # finer-grained class, e.g. "sql_injection"
+    must_cite: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -79,7 +77,7 @@ class NegativeAssertion:
 
     file: str
     category: str
-    line: Optional[int] = None
+    line: int | None = None
     line_tolerance: int = 3
     rationale: str = ""
 
@@ -89,12 +87,12 @@ class Fixture:
     """A single labeled PR fixture."""
 
     fixture_id: str
-    language: Optional[str]
+    language: str | None
     description: str
-    files: List[FixtureFile]
-    expected_issues: List[ExpectedIssue] = field(default_factory=list)
-    negative_assertions: List[NegativeAssertion] = field(default_factory=list)
-    source_path: Optional[Path] = None
+    files: list[FixtureFile]
+    expected_issues: list[ExpectedIssue] = field(default_factory=list)
+    negative_assertions: list[NegativeAssertion] = field(default_factory=list)
+    source_path: Path | None = None
 
 
 # ---- loaders ----------------------------------------------------------------
@@ -161,7 +159,7 @@ def load_fixture(path: Path | str) -> Fixture:
     )
 
 
-def load_fixture_directory(directory: Path | str) -> List[Fixture]:
+def load_fixture_directory(directory: Path | str) -> list[Fixture]:
     """Load every *.json file in a directory as a fixture."""
     d = Path(directory)
     fixtures = []

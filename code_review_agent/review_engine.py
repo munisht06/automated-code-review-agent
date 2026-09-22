@@ -1,10 +1,12 @@
-from dataclasses import dataclass, field
+import json
 import logging
 import os
 import re
-import json
-from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any
+
 from openai import AsyncAzureOpenAI
+
 from .rag_system import RAGSystem, azure_api_version
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ LLM_TEMPERATURE = 0.1
 @dataclass
 class SecurityIssue:
     """Represents a security vulnerability found in code."""
+
     type: str
     severity: str
     line: int
@@ -37,37 +40,39 @@ class SecurityIssue:
 @dataclass
 class LineComment:
     """Represents a single line comment in code review."""
+
     line: int
     severity: str  # "CRITICAL", "WARNING", "SUGGESTION"
     category: str  # "security", "style", "performance", "bug"
     issue: str
     suggestion: str
     # IDs of the retrieved guidelines the model says this comment relies on.
-    cited_guideline_ids: List[str] = field(default_factory=list)
+    cited_guideline_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
 class FileReviewResult:
     """Result of reviewing a single file."""
+
     filename: str
     summary: str
-    line_comments: List[LineComment] = field(default_factory=list)
-    security_issues: List[SecurityIssue] = field(default_factory=list)
-    style_suggestions: List[str] = field(default_factory=list)
+    line_comments: list[LineComment] = field(default_factory=list)
+    security_issues: list[SecurityIssue] = field(default_factory=list)
+    style_suggestions: list[str] = field(default_factory=list)
     # Provenance, recorded so a result can be traced to its inputs.
-    retrieved_guideline_ids: List[str] = field(default_factory=list)
-    truncated_inputs: List[str] = field(default_factory=list)
-    parse_error: Optional[str] = None
-    raw_response: Optional[str] = None
+    retrieved_guideline_ids: list[str] = field(default_factory=list)
+    truncated_inputs: list[str] = field(default_factory=list)
+    parse_error: str | None = None
+    raw_response: str | None = None
     # Model name reported in the API response (the model behind the deployment).
-    response_model: Optional[str] = None
+    response_model: str | None = None
     # Set by the evaluation harness when the review call itself failed
     # (network, API or content-filter error), as distinct from a response
     # that arrived but did not parse.
-    call_error: Optional[str] = None
+    call_error: str | None = None
 
 
-def clip_parts(text: str, limit: int) -> Tuple[str, str]:
+def clip_parts(text: str, limit: int) -> tuple[str, str]:
     """Cut ``text`` to at most ``limit`` characters, at the last line break
     when there is one, and return (kept text, truncation marker or "")."""
     if len(text) <= limit:
@@ -77,7 +82,7 @@ def clip_parts(text: str, limit: int) -> Tuple[str, str]:
     return kept, f"[... truncated: showing {len(kept)} of {len(text)} characters]"
 
 
-def clip(text: str, limit: int) -> Tuple[str, bool]:
+def clip(text: str, limit: int) -> tuple[str, bool]:
     """Cut ``text`` to its budget, appending a visible marker if cut."""
     kept, marker = clip_parts(text, limit)
     return (f"{kept}\n{marker}", True) if marker else (kept, False)
@@ -114,34 +119,40 @@ class SecurityScanner:
             # A string literal followed by + inside execute(...), not a + inside the
             # literal. The backreference closes the literal with its own quote, so
             # "... name = '" + name still matches.
-            (r'execute\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+', "Potential SQL injection via string concatenation"),
+            (
+                r'execute\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+',
+                "Potential SQL injection via string concatenation",
+            ),
             # A SQL statement built by concatenation, then executed elsewhere.
-            (r'=\s*(["\'])\s*(SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*\1\s*\+', "SQL query built by string concatenation"),
+            (
+                r'=\s*(["\'])\s*(SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*\1\s*\+',
+                "SQL query built by string concatenation",
+            ),
             (r'query\s*=\s*f["\']SELECT.*?\{', "SQL query with f-string interpolation"),
-            (r'\.format\s*\(.*?\).*?execute', "SQL query with .format() method"),
+            (r"\.format\s*\(.*?\).*?execute", "SQL query with .format() method"),
         ],
         "command_injection": [
-            (r'os\.system\s*\(.*?\+.*?\)', "Command injection via os.system"),
-            (r'subprocess\.(call|run|Popen)\s*\(.*?shell\s*=\s*True', "Shell injection risk"),
+            (r"os\.system\s*\(.*?\+.*?\)", "Command injection via os.system"),
+            (r"subprocess\.(call|run|Popen)\s*\(.*?shell\s*=\s*True", "Shell injection risk"),
             # Bare eval()/exec() only: not model.eval(), ast.literal_eval(), or regex.exec().
-            (r'(?<![\w.])eval\s*\(', "Use of eval() is dangerous"),
-            (r'(?<![\w.])exec\s*\(', "Use of exec() is dangerous"),
+            (r"(?<![\w.])eval\s*\(", "Use of eval() is dangerous"),
+            (r"(?<![\w.])exec\s*\(", "Use of exec() is dangerous"),
         ],
         "xss_vulnerability": [
-            (r'innerHTML\s*=\s*.*?\+', "Potential XSS via innerHTML"),
-            (r'dangerouslySetInnerHTML', "React XSS risk with dangerouslySetInnerHTML"),
-            (r'document\.write\s*\(', "XSS risk with document.write"),
+            (r"innerHTML\s*=\s*.*?\+", "Potential XSS via innerHTML"),
+            (r"dangerouslySetInnerHTML", "React XSS risk with dangerouslySetInnerHTML"),
+            (r"document\.write\s*\(", "XSS risk with document.write"),
         ],
         "path_traversal": [
             (r'open\s*\(.*?\+.*?["\']\.\.', "Path traversal vulnerability"),
             # A capitalized File constructor (Java, C#, Kotlin) taking a user-derived path.
             # Case-sensitive so read_file(...) and get_profile(...) do not match.
-            (r'(?<![\w.])(?-i:File)\s*\([^)]*\buser', "User-controlled file path"),
+            (r"(?<![\w.])(?-i:File)\s*\([^)]*\buser", "User-controlled file path"),
         ],
     }
 
     @classmethod
-    def scan(cls, code: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
+    def scan(cls, code: str, language: str | None = None) -> list[dict[str, Any]]:
         """
         Scan code for security vulnerabilities.
 
@@ -154,20 +165,22 @@ class SecurityScanner:
             List of security issues found
         """
         issues = []
-        lines = code.split('\n')
+        lines = code.split("\n")
 
         for vuln_type, patterns in cls.PATTERNS.items():
             for pattern, description in patterns:
                 for i, line in enumerate(lines, start=1):
                     if re.search(pattern, line, re.IGNORECASE):
-                        issues.append({
-                            "type": vuln_type,
-                            "severity": cls._get_severity(vuln_type),
-                            "line": i,
-                            "description": description,
-                            "code_snippet": line.strip(),
-                            "recommendation": cls._get_recommendation(vuln_type)
-                        })
+                        issues.append(
+                            {
+                                "type": vuln_type,
+                                "severity": cls._get_severity(vuln_type),
+                                "line": i,
+                                "description": description,
+                                "code_snippet": line.strip(),
+                                "recommendation": cls._get_recommendation(vuln_type),
+                            }
+                        )
 
         return issues
 
@@ -203,7 +216,7 @@ class ReviewEngine:
     guidelines and given the static scanner's findings as evidence.
     """
 
-    def __init__(self, client=None, rag_system: Optional[RAGSystem] = None, rag_enabled: bool = True):
+    def __init__(self, client=None, rag_system: RAGSystem | None = None, rag_enabled: bool = True):
         # The Azure client is created lazily unless one is injected (the
         # evaluation harness injects an offline stand-in in mock mode).
         self._client = client
@@ -239,8 +252,7 @@ class ReviewEngine:
         """
         # 1. Run static security scan
         security_issues = self.security_scanner.scan(
-            file_content,
-            language=RAGSystem._detect_language(filename)
+            file_content, language=RAGSystem._detect_language(filename)
         )
 
         # 2. Retrieve relevant guidelines using RAG
@@ -263,7 +275,7 @@ class ReviewEngine:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=LLM_TEMPERATURE,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
         )
 
         # 5. Parse, then attach provenance
@@ -274,7 +286,7 @@ class ReviewEngine:
         return result
 
     @staticmethod
-    def _prompt_truncations(guidelines: List, patch: str, file_content: str) -> List[str]:
+    def _prompt_truncations(guidelines: list, patch: str, file_content: str) -> list[str]:
         """Describe every input that exceeded its prompt budget."""
         cuts = []
         for g in guidelines:
@@ -286,7 +298,7 @@ class ReviewEngine:
             cuts.append(f"file content: {len(file_content)} > {MAX_FILE_CONTENT_CHARS} chars")
         return cuts
 
-    def _build_system_prompt(self, guidelines: List) -> str:
+    def _build_system_prompt(self, guidelines: list) -> str:
         """Build system prompt with guidelines and output format specification."""
         if guidelines:
             guidelines_text = "\n\n".join(
@@ -334,11 +346,7 @@ Be constructive, specific, and actionable. Focus on high-impact issues."""
     _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
     def _build_user_prompt(
-        self,
-        filename: str,
-        patch: str,
-        file_content: str,
-        security_issues: List[Dict]
+        self, filename: str, patch: str, file_content: str, security_issues: list[dict]
     ) -> str:
         """Build user prompt with code context and pre-scanned security issues."""
         security_context = ""
@@ -351,7 +359,9 @@ Be constructive, specific, and actionable. Focus on high-impact issues."""
             )
             security_context = "\n**Pre-identified Security Issues:**\n"
             for issue in sorted_issues[:MAX_SCANNER_FINDINGS_IN_PROMPT]:
-                security_context += f"- Line {issue['line']}: {issue['description']} ({issue['severity']})\n"
+                security_context += (
+                    f"- Line {issue['line']}: {issue['description']} ({issue['severity']})\n"
+                )
 
         patch_text, _ = clip(patch, MAX_PATCH_CHARS)
         # Number the kept lines first, then add the marker unnumbered, so the
@@ -378,7 +388,7 @@ Be constructive, specific, and actionable. Focus on high-impact issues."""
 Please provide a comprehensive code review in the specified JSON format."""
 
     @staticmethod
-    def _coerce_line(value) -> Optional[int]:
+    def _coerce_line(value) -> int | None:
         """Return a line number >= 1 from an int, a whole float or a string of
         ASCII digits; ``None`` for anything else."""
         if isinstance(value, bool):
@@ -394,10 +404,7 @@ Please provide a comprehensive code review in the specified JSON format."""
         return number if number is not None and number >= 1 else None
 
     def _parse_review_response(
-        self,
-        filename: str,
-        response,
-        security_issues: List[Dict]
+        self, filename: str, response, security_issues: list[dict]
     ) -> FileReviewResult:
         """Parse LLM response and construct FileReviewResult.
 
@@ -442,14 +449,16 @@ Please provide a comprehensive code review in the specified JSON format."""
                 cited = comment_data.get("cited_guideline_ids") or []
                 if not isinstance(cited, list):
                     cited = []
-                line_comments.append(LineComment(
-                    line=line,
-                    severity=str(comment_data.get("severity", "SUGGESTION")).strip().upper(),
-                    category=str(comment_data.get("category", "general")).strip().lower(),
-                    issue=str(comment_data.get("issue", "")),
-                    suggestion=str(comment_data.get("suggestion", "")),
-                    cited_guideline_ids=[str(c) for c in cited if isinstance(c, (str, int))],
-                ))
+                line_comments.append(
+                    LineComment(
+                        line=line,
+                        severity=str(comment_data.get("severity", "SUGGESTION")).strip().upper(),
+                        category=str(comment_data.get("category", "general")).strip().lower(),
+                        issue=str(comment_data.get("issue", "")),
+                        suggestion=str(comment_data.get("suggestion", "")),
+                        cited_guideline_ids=[str(c) for c in cited if isinstance(c, (str, int))],
+                    )
+                )
 
             style = review_data.get("style_suggestions") or []
             if not isinstance(style, list):
@@ -465,7 +474,14 @@ Please provide a comprehensive code review in the specified JSON format."""
                 raw_response=raw,
             )
 
-        except (json.JSONDecodeError, KeyError, AttributeError, IndexError, TypeError, ValueError) as e:
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            AttributeError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as e:
             logger.warning("Error parsing review response for %s: %s", filename, e)
             return FileReviewResult(
                 filename=filename,

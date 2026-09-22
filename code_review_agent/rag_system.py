@@ -3,12 +3,12 @@ RAG (Retrieval-Augmented Generation) system for retrieving relevant
 coding guidelines and standards to provide context-aware code reviews.
 """
 
-import os
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+
 import numpy as np
 from openai import AsyncAzureOpenAI
 
@@ -43,12 +43,13 @@ def azure_api_version() -> str:
 @dataclass
 class GuidelineDocument:
     """Represents a coding guideline or standard document."""
+
     id: str
     title: str
     content: str
-    language: Optional[str] = None
+    language: str | None = None
     category: str = "general"  # security, style, performance, best-practice
-    embedding: Optional[list[float]] = None
+    embedding: list[float] | None = None
 
 
 class RAGSystem:
@@ -56,8 +57,8 @@ class RAGSystem:
     Retrieval-Augmented Generation system for coding guidelines.
     Uses vector embeddings to find relevant guidelines for code review context.
     """
-    
-    def __init__(self, guidelines_path: Optional[str | Path] = None, client=None):
+
+    def __init__(self, guidelines_path: str | Path | None = None, client=None):
         # The Azure client is created lazily on first use, so the class can be
         # constructed (and its pure helpers tested) without credentials. A
         # client can also be injected, which is how the offline mock mode of
@@ -68,7 +69,7 @@ class RAGSystem:
         self.guidelines: list[GuidelineDocument] = []
         self.embeddings_cache: dict[str, list[float]] = {}
         # Where the loaded corpus came from, recorded in evaluation reports.
-        self.corpus_source: Optional[str] = None
+        self.corpus_source: str | None = None
 
     @property
     def client(self):
@@ -84,7 +85,7 @@ class RAGSystem:
         """Load and embed all guidelines documents."""
         await self._load_guidelines()
         await self._compute_embeddings()
-    
+
     async def _load_guidelines(self):
         """Load guidelines from the markdown files under ``guidelines_path``."""
         self.guidelines = []
@@ -93,17 +94,19 @@ class RAGSystem:
         if self.guidelines_path.exists():
             for file in self.guidelines_path.glob("**/*.md"):
                 content = file.read_text()
-                self.guidelines.append(GuidelineDocument(
-                    id=file.stem,
-                    title=file.stem.replace("_", " ").title(),
-                    content=content,
-                    language=self._detect_guideline_language(file.stem),
-                    # Pass both folder name and filename: folder takes precedence
-                    # when guidelines/ has category subfolders, but when files
-                    # live directly under guidelines/ (the common case), the
-                    # filename is what carries the category signal.
-                    category=self._detect_category(file.parent.name, file.stem)
-                ))
+                self.guidelines.append(
+                    GuidelineDocument(
+                        id=file.stem,
+                        title=file.stem.replace("_", " ").title(),
+                        content=content,
+                        language=self._detect_guideline_language(file.stem),
+                        # Pass both folder name and filename: folder takes precedence
+                        # when guidelines/ has category subfolders, but when files
+                        # live directly under guidelines/ (the common case), the
+                        # filename is what carries the category signal.
+                        category=self._detect_category(file.parent.name, file.stem),
+                    )
+                )
 
         if self.guidelines:
             self.corpus_source = str(self.guidelines_path)
@@ -116,7 +119,7 @@ class RAGSystem:
                 "No guideline files found at %s; using built-in default guidelines.",
                 self.guidelines_path,
             )
-    
+
     def _get_default_guidelines(self) -> list[GuidelineDocument]:
         """Provide sensible default guidelines."""
         return [
@@ -133,7 +136,7 @@ class RAGSystem:
 - Use context managers (with statements) for resource handling
 - Avoid mutable default arguments in function definitions""",
                 language="python",
-                category="style"
+                category="style",
             ),
             GuidelineDocument(
                 id="security_best_practices",
@@ -147,7 +150,7 @@ class RAGSystem:
 - Log security events but never log sensitive data
 - Keep dependencies updated to patch vulnerabilities
 - Use secure random generators for tokens/secrets""",
-                category="security"
+                category="security",
             ),
             GuidelineDocument(
                 id="error_handling",
@@ -160,7 +163,7 @@ class RAGSystem:
 - Use circuit breakers for external service calls
 - Clean up resources in finally blocks
 - Don't swallow exceptions silently""",
-                category="best-practice"
+                category="best-practice",
             ),
             GuidelineDocument(
                 id="performance",
@@ -173,7 +176,7 @@ class RAGSystem:
 - Profile before optimizing
 - Avoid premature optimization
 - Use appropriate data structures (sets for lookups, etc.)""",
-                category="performance"
+                category="performance",
             ),
             GuidelineDocument(
                 id="typescript_react",
@@ -188,34 +191,28 @@ class RAGSystem:
 - Implement error boundaries for component trees
 - Keep components small and focused""",
                 language="typescript",
-                category="style"
-            )
+                category="style",
+            ),
         ]
-    
+
     async def _compute_embeddings(self):
         """Compute embeddings for all guidelines."""
         for guideline in self.guidelines:
             if guideline.id not in self.embeddings_cache:
-                embedding = await self._get_embedding(
-                    f"{guideline.title}\n{guideline.content}"
-                )
+                embedding = await self._get_embedding(f"{guideline.title}\n{guideline.content}")
                 self.embeddings_cache[guideline.id] = embedding
                 guideline.embedding = embedding
-    
+
     async def _get_embedding(self, text: str) -> list[float]:
         """Get embedding vector for text using Azure OpenAI."""
         response = await self.client.embeddings.create(
-            model=self.embedding_model,
-            input=text[:MAX_EMBEDDING_INPUT_CHARS]
+            model=self.embedding_model, input=text[:MAX_EMBEDDING_INPUT_CHARS]
         )
         embedding: list[float] = response.data[0].embedding
         return embedding
-    
+
     async def retrieve_guidelines(
-        self,
-        filename: str,
-        code_snippet: str,
-        top_k: int = DEFAULT_TOP_K
+        self, filename: str, code_snippet: str, top_k: int = DEFAULT_TOP_K
     ) -> list[GuidelineDocument]:
         """
         Retrieve most relevant guidelines for the given code context.
@@ -224,38 +221,40 @@ class RAGSystem:
         # Ensure embeddings are computed
         if not self.embeddings_cache:
             await self.initialize()
-        
+
         # Build query from code context
         language = self._detect_language(filename)
-        query = f"Code review for {language} file: {filename}\n{code_snippet[:RETRIEVAL_QUERY_CHARS]}"
-        
+        query = (
+            f"Code review for {language} file: {filename}\n{code_snippet[:RETRIEVAL_QUERY_CHARS]}"
+        )
+
         # Get query embedding
         query_embedding = await self._get_embedding(query)
-        
+
         # Calculate similarities
         similarities = []
         for guideline in self.guidelines:
             if guideline.embedding:
                 sim = self._cosine_similarity(query_embedding, guideline.embedding)
-                
+
                 # Boost score if language matches
                 if guideline.language and guideline.language == language:
                     sim *= LANGUAGE_MATCH_BOOST
-                
+
                 similarities.append((guideline, sim))
-        
+
         # Sort by similarity and return top_k
         similarities.sort(key=lambda x: x[1], reverse=True)
         return [g for g, _ in similarities[:top_k]]
-    
+
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""
         a_arr, b_arr = np.array(a), np.array(b)
         return float(np.dot(a_arr, b_arr) / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr)))
-    
+
     @staticmethod
-    def _detect_language(filename: str) -> Optional[str]:
+    def _detect_language(filename: str) -> str | None:
         """Detect programming language from filename."""
         ext_map = {
             ".py": "python",
@@ -267,15 +266,15 @@ class RAGSystem:
             ".cs": "csharp",
             ".go": "go",
             ".rs": "rust",
-            ".rb": "ruby"
+            ".rb": "ruby",
         }
         for ext, lang in ext_map.items():
             if filename.endswith(ext):
                 return lang
         return None
-    
+
     @staticmethod
-    def _detect_guideline_language(stem: str) -> Optional[str]:
+    def _detect_guideline_language(stem: str) -> str | None:
         """Detect the language a guideline file covers from its file name.
 
         Guideline files are named for their language (``python_best_practices``,
@@ -321,33 +320,33 @@ class RAGSystem:
 
 class GuidelineManager:
     """Manage custom guidelines for specific repositories."""
-    
+
     def __init__(self, storage_path: str = "repo_guidelines"):
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(exist_ok=True)
-    
+
     def save_repo_guidelines(self, repo: str, guidelines: list[dict]):
         """Save custom guidelines for a repository."""
         repo_file = self.storage_path / f"{repo.replace('/', '_')}.json"
-        with open(repo_file, 'w') as f:
+        with open(repo_file, "w") as f:
             json.dump(guidelines, f, indent=2)
-    
+
     def load_repo_guidelines(self, repo: str) -> list[GuidelineDocument]:
         """Load custom guidelines for a repository."""
         repo_file = self.storage_path / f"{repo.replace('/', '_')}.json"
         if not repo_file.exists():
             return []
-        
+
         with open(repo_file) as f:
             data = json.load(f)
-        
+
         return [
             GuidelineDocument(
                 id=g.get("id", f"custom_{i}"),
                 title=g.get("title", "Custom Guideline"),
                 content=g.get("content", ""),
                 language=g.get("language"),
-                category=g.get("category", "custom")
+                category=g.get("category", "custom"),
             )
             for i, g in enumerate(data)
         ]

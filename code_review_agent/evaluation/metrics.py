@@ -35,13 +35,12 @@ lines 10 and 14 and findings at 8 and 11, greedy pairs 11 with 10 and leaves
 from __future__ import annotations
 
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
 
 from code_review_agent.review_engine import FileReviewResult, LineComment
 
 from .fixtures import ExpectedIssue, Fixture, NegativeAssertion
-
 
 # ---- correctness ------------------------------------------------------------
 
@@ -88,25 +87,23 @@ class CorrectnessMetrics:
     duplicate_findings: int = 0
     severity_weighted_recall_numerator: float = 0.0
     severity_weighted_recall_denominator: float = 0.0
-    matched_pairs: List[tuple] = field(default_factory=list)
-    unmatched_expected: List[ExpectedIssue] = field(default_factory=list)
-    unmatched_findings: List[LineComment] = field(default_factory=list)
-    negative_assertion_violations: List[NegativeAssertionViolation] = field(
-        default_factory=list
-    )
+    matched_pairs: list[tuple] = field(default_factory=list)
+    unmatched_expected: list[ExpectedIssue] = field(default_factory=list)
+    unmatched_findings: list[LineComment] = field(default_factory=list)
+    negative_assertion_violations: list[NegativeAssertionViolation] = field(default_factory=list)
 
     @property
-    def precision(self) -> Optional[float]:
+    def precision(self) -> float | None:
         denom = self.true_positives + self.false_positives
         return self.true_positives / denom if denom else None
 
     @property
-    def recall(self) -> Optional[float]:
+    def recall(self) -> float | None:
         denom = self.true_positives + self.false_negatives
         return self.true_positives / denom if denom else None
 
     @property
-    def f1(self) -> Optional[float]:
+    def f1(self) -> float | None:
         # 2TP / (2TP + FP + FN): defined whenever there is anything to score,
         # so a run that reports nothing against expected issues scores 0
         # rather than dropping out of the average.
@@ -114,13 +111,10 @@ class CorrectnessMetrics:
         return 2 * self.true_positives / denom if denom else None
 
     @property
-    def severity_weighted_recall(self) -> Optional[float]:
+    def severity_weighted_recall(self) -> float | None:
         if not self.severity_weighted_recall_denominator:
             return None
-        return (
-            self.severity_weighted_recall_numerator
-            / self.severity_weighted_recall_denominator
-        )
+        return self.severity_weighted_recall_numerator / self.severity_weighted_recall_denominator
 
     def to_dict(self) -> dict:
         return {
@@ -146,7 +140,7 @@ class CorrectnessMetrics:
         }
 
 
-def _round(x: Optional[float]) -> Optional[float]:
+def _round(x: float | None) -> float | None:
     return None if x is None else round(x, 4)
 
 
@@ -241,9 +235,7 @@ def compute_correctness(
     metrics = CorrectnessMetrics()
 
     findings: list[tuple[str, LineComment]] = [
-        (result.filename, comment)
-        for result in results
-        for comment in result.line_comments
+        (result.filename, comment) for result in results for comment in result.line_comments
     ]
 
     edges: dict[tuple[int, int], int] = {}
@@ -320,8 +312,12 @@ def summarize_correctness(per_run: Sequence[CorrectnessMetrics]) -> dict:
         true_positives=sum(m.true_positives for m in per_run),
         false_positives=sum(m.false_positives for m in per_run),
         false_negatives=sum(m.false_negatives for m in per_run),
-        severity_weighted_recall_numerator=sum(m.severity_weighted_recall_numerator for m in per_run),
-        severity_weighted_recall_denominator=sum(m.severity_weighted_recall_denominator for m in per_run),
+        severity_weighted_recall_numerator=sum(
+            m.severity_weighted_recall_numerator for m in per_run
+        ),
+        severity_weighted_recall_denominator=sum(
+            m.severity_weighted_recall_denominator for m in per_run
+        ),
     )
     out["pooled"] = {
         "true_positives": pooled.true_positives,
@@ -353,11 +349,11 @@ class ConsistencyMetrics:
     excluded_parse_failures: int = 0
     excluded_call_failures: int = 0
     line_tolerance: int = DEFAULT_LINE_TOLERANCE
-    pairwise_jaccard: List[float] = field(default_factory=list)
-    severity_stability: Optional[float] = None
+    pairwise_jaccard: list[float] = field(default_factory=list)
+    severity_stability: float | None = None
 
     @property
-    def mean_jaccard(self) -> Optional[float]:
+    def mean_jaccard(self) -> float | None:
         if not self.pairwise_jaccard:
             return None
         return sum(self.pairwise_jaccard) / len(self.pairwise_jaccard)
@@ -438,7 +434,7 @@ def _tolerant_jaccard(a: list, b: list, tol: int) -> float:
     return m / (len(a) + len(b) - m)
 
 
-def _severity_stability(finding_lists: list, tol: int) -> Optional[float]:
+def _severity_stability(finding_lists: list, tol: int) -> float | None:
     """Of the findings in the first run that are matched in every other run,
     the fraction assigned the same severity in all of them. Each other run is
     matched to the first one-to-one, as in Jaccard. ``None`` if no finding
@@ -452,7 +448,9 @@ def _severity_stability(finding_lists: list, tol: int) -> Optional[float]:
         if not all(i in m for m in matches):
             continue
         persistent += 1
-        severities = {finding[3]} | {other[m[i]][3] for other, m in zip(others, matches, strict=True)}
+        severities = {finding[3]} | {
+            other[m[i]][3] for other, m in zip(others, matches, strict=True)
+        }
         if len(severities) == 1:
             stable += 1
     return stable / persistent if persistent else None
@@ -481,11 +479,11 @@ class CitationChecks:
     n_cited: int = 0
 
     @property
-    def retrieved_rate(self) -> Optional[float]:
+    def retrieved_rate(self) -> float | None:
         return self.n_retrieved / self.n_with_must_cite if self.n_with_must_cite else None
 
     @property
-    def cited_rate(self) -> Optional[float]:
+    def cited_rate(self) -> float | None:
         return self.n_cited / self.n_matched if self.n_matched else None
 
     def to_dict(self) -> dict:
@@ -533,8 +531,8 @@ class GroundingTask:
     file: str
     line: int
     comment_text: str
-    cited_guideline_ids: List[str]
-    retrieved_guideline_ids: List[str]
+    cited_guideline_ids: list[str]
+    retrieved_guideline_ids: list[str]
     # Filled in by the human grader after the fact.
     applicable: bool | None = None
     specific: bool | None = None
@@ -543,8 +541,8 @@ class GroundingTask:
 def emit_grounding_tasks(
     fixture: Fixture,
     results: Sequence[FileReviewResult],
-    retrieved_guideline_ids_per_file: dict[str, List[str]] | None = None,
-) -> List[GroundingTask]:
+    retrieved_guideline_ids_per_file: dict[str, list[str]] | None = None,
+) -> list[GroundingTask]:
     """
     Emit one labeling task per LLM comment, carrying the guideline IDs the
     comment cites and the IDs that were retrieved for its file.
@@ -581,9 +579,9 @@ class GroundingFidelityMetrics:
     in the corresponding fields; until then they are ``None``.
     """
 
-    citation_applicability: Optional[float] = None
-    citation_specificity: Optional[float] = None
-    citation_rate: Optional[float] = None
+    citation_applicability: float | None = None
+    citation_specificity: float | None = None
+    citation_rate: float | None = None
     n_total_tasks: int = 0
     n_labeled_applicable: int = 0
     n_labeled_specific: int = 0
@@ -619,15 +617,15 @@ def aggregate_grounding_labels(tasks: Sequence[GroundingTask]) -> GroundingFidel
     labeled_applicable = [t for t in tasks if t.applicable is not None]
     metrics.n_labeled_applicable = len(labeled_applicable)
     if labeled_applicable:
-        metrics.citation_applicability = (
-            sum(1 for t in labeled_applicable if t.applicable) / len(labeled_applicable)
+        metrics.citation_applicability = sum(1 for t in labeled_applicable if t.applicable) / len(
+            labeled_applicable
         )
 
     labeled_specific = [t for t in tasks if t.specific is not None]
     metrics.n_labeled_specific = len(labeled_specific)
     if labeled_specific:
-        metrics.citation_specificity = (
-            sum(1 for t in labeled_specific if t.specific) / len(labeled_specific)
+        metrics.citation_specificity = sum(1 for t in labeled_specific if t.specific) / len(
+            labeled_specific
         )
 
     return metrics

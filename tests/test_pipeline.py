@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import hmac
 import json
-import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,11 +32,15 @@ def response_with(content):
     return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
 
 
-SCANNER_HIT = [{
-    "type": "sql_injection", "severity": "CRITICAL", "line": 10,
-    "description": "SQL query with f-string interpolation",
-    "recommendation": "Use parameterized queries or prepared statements",
-}]
+SCANNER_HIT = [
+    {
+        "type": "sql_injection",
+        "severity": "CRITICAL",
+        "line": 10,
+        "description": "SQL query with f-string interpolation",
+        "recommendation": "Use parameterized queries or prepared statements",
+    }
+]
 
 
 # ---- construction without credentials ---------------------------------------
@@ -53,6 +56,7 @@ def test_engine_and_rag_construct_without_credentials(monkeypatch):
 
 def test_api_version_is_read_when_the_client_is_created(monkeypatch):
     from code_review_agent.rag_system import azure_api_version
+
     monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2099-01-01")
     assert azure_api_version() == "2099-01-01"
     monkeypatch.delenv("AZURE_OPENAI_API_VERSION")
@@ -61,6 +65,7 @@ def test_api_version_is_read_when_the_client_is_created(monkeypatch):
 
 def test_review_records_the_model_the_api_reports():
     from code_review_agent.evaluation.mock_llm import MockAzureClient
+
     engine = ReviewEngine(client=MockAzureClient())
     content = 'import db\nq = f"SELECT * FROM t WHERE id = {x}"\n'
     result = asyncio.run(engine.review_file("a.py", "", content))
@@ -76,12 +81,18 @@ class TestCorpus:
         monkeypatch.chdir(tmp_path)
         rag = load_bundled_guidelines()
         assert rag.corpus_source == str(DEFAULT_GUIDELINES_PATH)
-        assert {g.id for g in rag.guidelines} == {"python_best_practices", "typescript_react_standards"}
+        assert {g.id for g in rag.guidelines} == {
+            "python_best_practices",
+            "typescript_react_standards",
+        }
 
     def test_guideline_language_detected_from_file_name(self):
         rag = load_bundled_guidelines()
         languages = {g.id: g.language for g in rag.guidelines}
-        assert languages == {"python_best_practices": "python", "typescript_react_standards": "typescript"}
+        assert languages == {
+            "python_best_practices": "python",
+            "typescript_react_standards": "typescript",
+        }
 
     def test_missing_corpus_falls_back_visibly(self, tmp_path):
         rag = RAGSystem(guidelines_path=tmp_path / "does-not-exist")
@@ -151,32 +162,65 @@ class TestParsing:
         return engine._parse_review_response("a.py", response_with(content), scanner or [])
 
     def test_citations_and_normalization(self):
-        r = self.parse(json.dumps({"summary": "s", "comments": [{
-            "line": "10", "severity": "critical", "category": "Security",
-            "issue": "i", "suggestion": "s", "cited_guideline_ids": ["python_best_practices"],
-        }]}))
+        r = self.parse(
+            json.dumps(
+                {
+                    "summary": "s",
+                    "comments": [
+                        {
+                            "line": "10",
+                            "severity": "critical",
+                            "category": "Security",
+                            "issue": "i",
+                            "suggestion": "s",
+                            "cited_guideline_ids": ["python_best_practices"],
+                        }
+                    ],
+                }
+            )
+        )
         c = r.line_comments[0]
         assert (c.line, c.severity, c.category) == (10, "CRITICAL", "security")
         assert c.cited_guideline_ids == ["python_best_practices"]
         assert r.parse_error is None
 
     def test_line_values(self):
-        r = self.parse(json.dumps({"summary": "s", "comments": [
-            {"line": "²", "category": "bug"}, {"line": 0, "category": "bug"},
-            {"line": "-4", "category": "bug"}, {"line": 10.0, "category": "bug"},
-            {"line": 10.5, "category": "bug"}, {"line": " 7 ", "category": "bug"},
-        ]}))
+        r = self.parse(
+            json.dumps(
+                {
+                    "summary": "s",
+                    "comments": [
+                        {"line": "²", "category": "bug"},
+                        {"line": 0, "category": "bug"},
+                        {"line": "-4", "category": "bug"},
+                        {"line": 10.0, "category": "bug"},
+                        {"line": 10.5, "category": "bug"},
+                        {"line": " 7 ", "category": "bug"},
+                    ],
+                }
+            )
+        )
         assert [c.line for c in r.line_comments] == [10, 7]
         assert "dropped 4" in r.parse_error
 
     def test_malformed_comment_dropped_and_recorded(self):
-        r = self.parse(json.dumps({"summary": "s", "comments": [
-            {"line": "ten", "category": "bug"}, {"line": 3, "category": "bug"},
-        ]}))
+        r = self.parse(
+            json.dumps(
+                {
+                    "summary": "s",
+                    "comments": [
+                        {"line": "ten", "category": "bug"},
+                        {"line": 3, "category": "bug"},
+                    ],
+                }
+            )
+        )
         assert [c.line for c in r.line_comments] == [3]
         assert "dropped 1" in r.parse_error
 
-    @pytest.mark.parametrize("content", [None, "not json", "[1, 2]", json.dumps({"comments": None, "summary": "s"})])
+    @pytest.mark.parametrize(
+        "content", [None, "not json", "[1, 2]", json.dumps({"comments": None, "summary": "s"})]
+    )
     def test_bad_output_keeps_scanner_findings(self, content):
         r = self.parse(content, SCANNER_HIT)
         assert len(r.security_issues) == 1  # scanner evidence survives
@@ -189,29 +233,38 @@ class TestParsing:
 
 
 class TestScannerPrecisionGuards:
-    @pytest.mark.parametrize("code", [
-        "model.eval()",
-        "x = ast.literal_eval(s)",
-        "m = re.exec(s)",
-        'cursor.execute("SELECT a + b FROM t")',
-        "profile = get_profile(user_id)",
-        "data = read_file(username)",
-        'AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]',
-        'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
-    ])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "model.eval()",
+            "x = ast.literal_eval(s)",
+            "m = re.exec(s)",
+            'cursor.execute("SELECT a + b FROM t")',
+            "profile = get_profile(user_id)",
+            "data = read_file(username)",
+            'AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]',
+            'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
+        ],
+    )
     def test_not_flagged(self, code):
         assert SecurityScanner.scan(code) == []
 
-    @pytest.mark.parametrize("code,vuln", [
-        ("result = eval(user_input)", "command_injection"),
-        ("exec(code)", "command_injection"),
-        ('File f = new File(userPath);', "path_traversal"),
-        ('aws_secret_access_key = "AKIAABCDEFGHIJKLMNOP"', "hardcoded_secret"),
-        ('cursor.execute("SELECT * FROM t WHERE id = " + uid)', "sql_injection"),
-        ("cursor.execute(\"SELECT * FROM users WHERE name = '\" + name + \"'\")", "sql_injection"),
-        ("query = \"SELECT * FROM users WHERE name = '\" + name", "sql_injection"),
-        ('creds = {"aws_secret_access_key": "AKIAABCDEFGHIJKLMNOP"}', "hardcoded_secret"),
-    ])
+    @pytest.mark.parametrize(
+        "code,vuln",
+        [
+            ("result = eval(user_input)", "command_injection"),
+            ("exec(code)", "command_injection"),
+            ("File f = new File(userPath);", "path_traversal"),
+            ('aws_secret_access_key = "AKIAABCDEFGHIJKLMNOP"', "hardcoded_secret"),
+            ('cursor.execute("SELECT * FROM t WHERE id = " + uid)', "sql_injection"),
+            (
+                'cursor.execute("SELECT * FROM users WHERE name = \'" + name + "\'")',
+                "sql_injection",
+            ),
+            ('query = "SELECT * FROM users WHERE name = \'" + name', "sql_injection"),
+            ('creds = {"aws_secret_access_key": "AKIAABCDEFGHIJKLMNOP"}', "hardcoded_secret"),
+        ],
+    )
     def test_flagged(self, code, vuln):
         assert any(i["type"] == vuln for i in SecurityScanner.scan(code))
 
@@ -240,13 +293,16 @@ def test_commentable_lines_uses_hunk_counts():
 class TestWebhook:
     def client(self, monkeypatch, secret="s3cret"):
         from fastapi.testclient import TestClient
+
         from code_review_agent import main
+
         monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", secret)
         monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", False)
         calls = []
 
         async def fake_process(*args):
             calls.append(args)
+
         monkeypatch.setattr(main, "process_pull_request", fake_process)
         return TestClient(main.app), calls
 
@@ -255,9 +311,14 @@ class TestWebhook:
         return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
     def post(self, client, body, sig):
-        return client.post("/webhook/github", content=body, headers={
-            "X-Hub-Signature-256": sig, "X-GitHub-Event": "pull_request",
-        })
+        return client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "pull_request",
+            },
+        )
 
     def test_bad_signature_401(self, monkeypatch):
         client, calls = self.client(monkeypatch)
@@ -276,11 +337,13 @@ class TestWebhook:
 
     def test_valid_event_queued(self, monkeypatch):
         client, calls = self.client(monkeypatch)
-        body = json.dumps({
-            "action": "opened",
-            "repository": {"full_name": "o/r"},
-            "pull_request": {"number": 7, "head": {"sha": "abc"}},
-        }).encode()
+        body = json.dumps(
+            {
+                "action": "opened",
+                "repository": {"full_name": "o/r"},
+                "pull_request": {"number": 7, "head": {"sha": "abc"}},
+            }
+        ).encode()
         resp = self.post(client, body, self.sign(body))
         assert resp.status_code == 200
         assert resp.json() == {"status": "processing", "pr_number": 7}
@@ -322,10 +385,18 @@ def test_process_pull_request_routes_comments(monkeypatch):
         async def review_file(self, filename, patch, file_content):
             if filename == "b.py":
                 raise RuntimeError("secret detail")
-            return FileReviewResult(filename=filename, summary="ok", line_comments=[
-                LineComment(line=2, severity="WARNING", category="bug", issue="in diff", suggestion="s"),
-                LineComment(line=40, severity="WARNING", category="bug", issue="outside", suggestion="s"),
-            ])
+            return FileReviewResult(
+                filename=filename,
+                summary="ok",
+                line_comments=[
+                    LineComment(
+                        line=2, severity="WARNING", category="bug", issue="in diff", suggestion="s"
+                    ),
+                    LineComment(
+                        line=40, severity="WARNING", category="bug", issue="outside", suggestion="s"
+                    ),
+                ],
+            )
 
     monkeypatch.setattr(github_client, "GitHubClient", FakeGitHub)
     monkeypatch.setattr(engine_mod, "ReviewEngine", FakeEngine)

@@ -25,7 +25,12 @@ from types import SimpleNamespace
 
 _EMBEDDING_DIM = 256
 _SCANNER_LINE = re.compile(r"^- Line (\d+): (.+) \((CRITICAL|HIGH|MEDIUM|LOW)\)\s*$", re.MULTILINE)
-_SEVERITY_MAP = {"CRITICAL": "CRITICAL", "HIGH": "WARNING", "MEDIUM": "WARNING", "LOW": "SUGGESTION"}
+_SEVERITY_MAP = {
+    "CRITICAL": "CRITICAL",
+    "HIGH": "WARNING",
+    "MEDIUM": "WARNING",
+    "LOW": "SUGGESTION",
+}
 
 
 def _hashed_embedding(text: str) -> list[float]:

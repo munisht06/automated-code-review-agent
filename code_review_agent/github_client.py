@@ -1,7 +1,7 @@
 import base64
 import re
 from dataclasses import dataclass
-from typing import List, Dict, Any, Set
+from typing import Any
 
 import httpx
 
@@ -11,17 +11,18 @@ _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 @dataclass
 class PRComment:
     """Represents a comment on a Pull Request."""
+
     path: str
     line: int
     body: str
     side: str = "RIGHT"  # "LEFT" for old version, "RIGHT" for new version
 
-    def to_review_comment(self) -> Dict[str, Any]:
+    def to_review_comment(self) -> dict[str, Any]:
         """The shape GitHub's create-review endpoint expects for one comment."""
         return {"path": self.path, "line": self.line, "side": self.side, "body": self.body}
 
 
-def commentable_lines(patch: str) -> Set[int]:
+def commentable_lines(patch: str) -> set[int]:
     """New-file line numbers that GitHub accepts review comments on.
 
     GitHub only accepts line comments on lines that appear in the diff. On
@@ -29,7 +30,7 @@ def commentable_lines(patch: str) -> Set[int]:
     hunk's new-side line count, from its header, bounds the lines taken from
     it, so a trailing newline after the last hunk adds no phantom line.
     """
-    lines: Set[int] = set()
+    lines: set[int] = set()
     new_line = 0
     remaining = 0
     for raw in (patch or "").split("\n"):
@@ -61,18 +62,18 @@ class GitHubClient:
         }
         self.base_url = "https://api.github.com"
 
-    async def get_pull_request(self, repo: str, pr_number: int) -> Dict[str, Any]:
+    async def get_pull_request(self, repo: str, pr_number: int) -> dict[str, Any]:
         url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}"
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=self.headers)
             response.raise_for_status()
-            data: Dict[str, Any] = response.json()
+            data: dict[str, Any] = response.json()
             return data
 
-    async def get_pr_files(self, repo: str, pr_number: int) -> List[Dict[str, Any]]:
+    async def get_pr_files(self, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """All changed files, following pagination (GitHub's default page is 30)."""
         url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}/files"
-        files: List[Dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
         async with httpx.AsyncClient() as client:
             for page in range(1, self.MAX_PAGES + 1):
                 response = await client.get(
@@ -99,7 +100,14 @@ class GitHubClient:
             response = await client.post(url, json=payload, headers=self.headers)
             response.raise_for_status()
 
-    async def create_pr_review(self, repo: str, pr_number: int, commit_sha: str, comments: List[Dict[str, Any]], summary: str):
+    async def create_pr_review(
+        self,
+        repo: str,
+        pr_number: int,
+        commit_sha: str,
+        comments: list[dict[str, Any]],
+        summary: str,
+    ):
         url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}/reviews"
         payload = {
             "commit_id": commit_sha,

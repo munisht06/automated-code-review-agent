@@ -49,12 +49,11 @@ import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
 
 from dotenv import load_dotenv
 
-from code_review_agent import review_engine as re_mod
 from code_review_agent import rag_system as rag_mod
+from code_review_agent import review_engine as re_mod
 from code_review_agent.review_engine import FileReviewResult, ReviewEngine
 
 from .fixtures import Fixture, load_fixture, load_fixture_directory
@@ -76,11 +75,12 @@ def make_engine(rag_enabled: bool, mock: bool) -> ReviewEngine:
     client = None
     if mock:
         from .mock_llm import MockAzureClient
+
         client = MockAzureClient()
     return ReviewEngine(client=client, rag_enabled=rag_enabled)
 
 
-async def run_one_fixture(fixture: Fixture, engine: ReviewEngine) -> List[FileReviewResult]:
+async def run_one_fixture(fixture: Fixture, engine: ReviewEngine) -> list[FileReviewResult]:
     """Run the agent against every file in a fixture once.
 
     A review call that raises (network, API or content-filter error) is
@@ -104,16 +104,20 @@ async def run_one_fixture(fixture: Fixture, engine: ReviewEngine) -> List[FileRe
     return results
 
 
-async def run_repeats(fixture: Fixture, engine: ReviewEngine, repeats: int) -> List[List[FileReviewResult]]:
+async def run_repeats(
+    fixture: Fixture, engine: ReviewEngine, repeats: int
+) -> list[list[FileReviewResult]]:
     """Run the same fixture N times with the same engine and configuration."""
     return [await run_one_fixture(fixture, engine) for _ in range(repeats)]
 
 
-def _git(*cmd: str) -> Optional[str]:
+def _git(*cmd: str) -> str | None:
     try:
         return subprocess.run(
             ["git", *cmd],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
             cwd=Path(__file__).resolve().parent,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
@@ -137,7 +141,9 @@ def run_metadata(args: argparse.Namespace, engine: ReviewEngine, git: dict) -> d
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **git,
-        "mode": "mock (offline scanner-echo, not a model result)" if args.mock_llm else "azure-openai",
+        "mode": (
+            "mock (offline scanner-echo, not a model result)" if args.mock_llm else "azure-openai"
+        ),
         "chat_deployment": None if args.mock_llm else engine.deployment,
         "embedding_deployment": None if args.mock_llm else rag.embedding_model,
         "api_version": None if args.mock_llm else rag_mod.azure_api_version(),
@@ -161,7 +167,7 @@ def run_metadata(args: argparse.Namespace, engine: ReviewEngine, git: dict) -> d
     }
 
 
-def _file_provenance(runs: List[List[FileReviewResult]]) -> list:
+def _file_provenance(runs: list[list[FileReviewResult]]) -> list:
     return [
         [
             {
@@ -180,7 +186,9 @@ def _file_provenance(runs: List[List[FileReviewResult]]) -> list:
     ]
 
 
-def score_fixture(fixture: Fixture, runs: List[List[FileReviewResult]], line_tolerance: int) -> dict:
+def score_fixture(
+    fixture: Fixture, runs: list[list[FileReviewResult]], line_tolerance: int
+) -> dict:
     """Score all runs of one fixture into a report payload.
 
     Runs with a failed review call are listed in ``failed_runs`` and left out
@@ -199,9 +207,13 @@ def score_fixture(fixture: Fixture, runs: List[List[FileReviewResult]], line_tol
         "runs": len(runs),
         "failed_runs": failed,
         "reference_run": ref,
-        "correctness_per_run": [per_run[i].to_dict() if i in per_run else None for i in range(len(runs))],
+        "correctness_per_run": [
+            per_run[i].to_dict() if i in per_run else None for i in range(len(runs))
+        ],
         "correctness_across_runs": summarize_correctness([per_run[i] for i in ok]),
-        "citation_checks_per_run": [citation[i].to_dict() if i in citation else None for i in range(len(runs))],
+        "citation_checks_per_run": [
+            citation[i].to_dict() if i in citation else None for i in range(len(runs))
+        ],
         # Labeling tasks come from one run only, so a batch is labeled once
         # rather than N times.
         "grounding_tasks_reference_run": [asdict(t) for t in tasks],
@@ -227,7 +239,9 @@ def _render_markdown(payload: dict, meta: dict) -> str:
     dirty = " (with uncommitted changes)" if meta.get("git_uncommitted_changes") else ""
     out.append(f"- Commit: {_fmt(meta['git_commit'])}{dirty}")
     if payload["failed_runs"]:
-        out.append(f"- Runs with a failed review call, excluded from scoring: {payload['failed_runs']}")
+        out.append(
+            f"- Runs with a failed review call, excluded from scoring: {payload['failed_runs']}"
+        )
     out.append("")
     s = payload["correctness_across_runs"]
     out.append("## Correctness")
@@ -235,8 +249,12 @@ def _render_markdown(payload: dict, meta: dict) -> str:
     out.append("| Metric | Mean | Std dev | Min | Max | Runs defined | Pooled |")
     out.append("|---|---|---|---|---|---|---|")
     pooled = s["pooled"]
-    for name, label in (("precision", "Precision"), ("recall", "Recall"), ("f1", "F1"),
-                        ("severity_weighted_recall", "Severity-weighted recall")):
+    for name, label in (
+        ("precision", "Precision"),
+        ("recall", "Recall"),
+        ("f1", "F1"),
+        ("severity_weighted_recall", "Severity-weighted recall"),
+    ):
         m = s[name]
         out.append(
             f"| {label} | {_fmt(m['mean'])} | {_fmt(m['stdev'])} | {_fmt(m['min'])} | "
@@ -251,8 +269,10 @@ def _render_markdown(payload: dict, meta: dict) -> str:
         return "\n".join(out) + "\n"
     c0 = payload["correctness_per_run"][ref]
     out.append("")
-    out.append(f"Run {ref}: TP / FP / FN = {c0['true_positives']} / {c0['false_positives']} / "
-               f"{c0['false_negatives']}; duplicate findings: {c0['duplicate_findings']}.")
+    out.append(
+        f"Run {ref}: TP / FP / FN = {c0['true_positives']} / {c0['false_positives']} / "
+        f"{c0['false_negatives']}; duplicate findings: {c0['duplicate_findings']}."
+    )
     if c0["unmatched_expected"]:
         out.append("")
         out.append(f"Missed expected issues in run {ref}:")
@@ -262,18 +282,26 @@ def _render_markdown(payload: dict, meta: dict) -> str:
         out.append("")
         out.append(f"Negative-assertion violations in run {ref}:")
         for v in c0["negative_assertion_violations"]:
-            out.append(f"- {v['file']} {v['category']} at line {v['comment_line']}: {v['rationale']}")
+            out.append(
+                f"- {v['file']} {v['category']} at line {v['comment_line']}: {v['rationale']}"
+            )
     cc = payload["citation_checks_per_run"][ref]
     g = payload["grounding_summary_reference_run"]
     out.append("")
     out.append(f"## Citations (run {ref})")
     out.append("")
-    out.append(f"- Comments citing at least one guideline: {_fmt(g['citation_rate'])} "
-               f"(over {g['n_total_tasks']} comment(s))")
-    out.append(f"- Expected issues whose required guidelines were retrieved: "
-               f"{_fmt(cc['must_cite_retrieved_rate'])} (over {cc['n_expected_with_must_cite']})")
-    out.append(f"- Matched issues whose comment cited the required guidelines: "
-               f"{_fmt(cc['must_cite_cited_rate'])} (over {cc['n_matched_with_must_cite']})")
+    out.append(
+        f"- Comments citing at least one guideline: {_fmt(g['citation_rate'])} "
+        f"(over {g['n_total_tasks']} comment(s))"
+    )
+    out.append(
+        f"- Expected issues whose required guidelines were retrieved: "
+        f"{_fmt(cc['must_cite_retrieved_rate'])} (over {cc['n_expected_with_must_cite']})"
+    )
+    out.append(
+        f"- Matched issues whose comment cited the required guidelines: "
+        f"{_fmt(cc['must_cite_cited_rate'])} (over {cc['n_matched_with_must_cite']})"
+    )
     if "consistency" in payload:
         k = payload["consistency"]
         out.append("")
@@ -287,9 +315,18 @@ def _render_markdown(payload: dict, meta: dict) -> str:
         out.append(f"| Mean pairwise Jaccard | {_fmt(k['mean_jaccard'])} |")
         out.append(f"| Min / max Jaccard | {_fmt(k['min_jaccard'])} / {_fmt(k['max_jaccard'])} |")
         out.append(f"| Severity stability | {_fmt(k['severity_stability'])} |")
-    cuts = sorted({c for run in payload["files_per_run"] for f in run for c in f["truncated_inputs"]})
+    cuts = sorted(
+        {c for run in payload["files_per_run"] for f in run for c in f["truncated_inputs"]}
+    )
     errors = sum(1 for run in payload["files_per_run"] for f in run if f["parse_error"])
-    models = sorted({f["response_model"] for run in payload["files_per_run"] for f in run if f["response_model"]})
+    models = sorted(
+        {
+            f["response_model"]
+            for run in payload["files_per_run"]
+            for f in run
+            if f["response_model"]
+        }
+    )
     out.append("")
     out.append("## Input handling")
     out.append("")
@@ -314,7 +351,9 @@ def _write_summary(report_dir: Path, rows: list, meta: dict) -> None:
     dirty = " (with uncommitted changes)" if meta.get("git_uncommitted_changes") else ""
     out.append(f"- Commit: {_fmt(meta['git_commit'])}{dirty}")
     out.append("")
-    out.append("| Fixture | Precision (mean) | Recall (mean) | F1 (mean) | Severity-weighted recall (mean) |")
+    out.append(
+        "| Fixture | Precision (mean) | Recall (mean) | F1 (mean) | Severity-weighted recall (mean) |"
+    )
     out.append("|---|---|---|---|---|")
     for fid, s in rows:
         out.append(
@@ -389,25 +428,45 @@ def _non_negative_int(value: str) -> int:
     return number
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="Evaluation harness for the Automated Code Review Agent."
     )
     fixture_group = parser.add_mutually_exclusive_group(required=True)
     fixture_group.add_argument("--fixture", type=Path, help="Run a single fixture file.")
-    fixture_group.add_argument("--fixtures", type=Path, help="Run every JSON fixture in this directory.")
-    parser.add_argument("--report", type=Path, default=Path("reports"),
-                        help="Directory to write JSON + Markdown reports into.")
-    parser.add_argument("--no-rag", action="store_true",
-                        help="RAG-off arm: retrieve no guidelines and put none in the prompt.")
-    parser.add_argument("--repeats", type=_positive_int, default=1,
-                        help="Number of runs per fixture (consistency metrics need at least 2).")
-    parser.add_argument("--line-tolerance", type=_non_negative_int, default=DEFAULT_LINE_TOLERANCE,
-                        help="Line window for matching findings to expected issues and across runs.")
-    parser.add_argument("--mock-llm", action="store_true",
-                        help="Run offline with a deterministic scanner-echo stand-in for the LLM. "
-                             "Checks the harness; does not produce model results.")
+    fixture_group.add_argument(
+        "--fixtures", type=Path, help="Run every JSON fixture in this directory."
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=Path("reports"),
+        help="Directory to write JSON + Markdown reports into.",
+    )
+    parser.add_argument(
+        "--no-rag",
+        action="store_true",
+        help="RAG-off arm: retrieve no guidelines and put none in the prompt.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=_positive_int,
+        default=1,
+        help="Number of runs per fixture (consistency metrics need at least 2).",
+    )
+    parser.add_argument(
+        "--line-tolerance",
+        type=_non_negative_int,
+        default=DEFAULT_LINE_TOLERANCE,
+        help="Line window for matching findings to expected issues and across runs.",
+    )
+    parser.add_argument(
+        "--mock-llm",
+        action="store_true",
+        help="Run offline with a deterministic scanner-echo stand-in for the LLM. "
+        "Checks the harness; does not produce model results.",
+    )
     args = parser.parse_args(argv)
     return asyncio.run(amain(args))
 

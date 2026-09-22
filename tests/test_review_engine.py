@@ -2,80 +2,81 @@
 Test suite for the Code Review Agent.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 import json
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from code_review_agent.github_client import GitHubClient, PRComment
+from code_review_agent.rag_system import GuidelineDocument, RAGSystem
 from code_review_agent.review_engine import (
-    ReviewEngine,
-    SecurityScanner,
     FileReviewResult,
     LineComment,
+    ReviewEngine,
     SecurityIssue,
+    SecurityScanner,
 )
-from code_review_agent.github_client import GitHubClient, PRComment
-from code_review_agent.rag_system import RAGSystem, GuidelineDocument
-
 
 # ============================================
 # Security Scanner Tests
 # ============================================
 
+
 class TestSecurityScanner:
     """Tests for the SecurityScanner class."""
 
     def test_detects_hardcoded_password(self):
-        code = '''
+        code = """
 def connect():
     password = "super_secret_123"
     return db.connect(password)
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert len(issues) > 0
         assert any(i["type"] == "hardcoded_secret" for i in issues)
 
     def test_detects_sql_injection_fstring(self):
-        code = '''
+        code = """
 def get_user(user_id):
     query = f"SELECT * FROM users WHERE id = {user_id}"
     cursor.execute(query)
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert any(i["type"] == "sql_injection" for i in issues)
 
     def test_detects_sql_injection_concatenation(self):
-        code = '''
+        code = """
 def get_user(user_id):
     query = "SELECT * FROM users WHERE id = " + user_id
     cursor.execute(query)
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert any(i["type"] == "sql_injection" and i["line"] == 3 for i in issues)
 
     def test_detects_command_injection(self):
-        code = '''
+        code = """
 import os
 def run_command(user_input):
     os.system("ls " + user_input)
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert any(i["type"] == "command_injection" for i in issues)
 
     def test_detects_eval_usage(self):
-        code = '''
+        code = """
 def dangerous(user_input):
     result = eval(user_input)
     return result
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert any(i["type"] == "command_injection" for i in issues)
 
     def test_clean_code_no_issues(self):
-        code = '''
+        code = """
 def get_user(user_id: int):
     cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
     return cursor.fetchone()
-'''
+"""
         issues = SecurityScanner.scan(code)
         assert not any(i["type"] in ["hardcoded_secret", "sql_injection"] for i in issues)
 
@@ -88,8 +89,13 @@ def get_user(user_id: int):
 
     def test_recommendations_exist(self):
         """Test that all vulnerability types have recommendations."""
-        vuln_types = ["hardcoded_secret", "sql_injection", "command_injection", 
-                      "xss_vulnerability", "path_traversal"]
+        vuln_types = [
+            "hardcoded_secret",
+            "sql_injection",
+            "command_injection",
+            "xss_vulnerability",
+            "path_traversal",
+        ]
         for vuln_type in vuln_types:
             rec = SecurityScanner._get_recommendation(vuln_type)
             assert rec is not None
@@ -99,6 +105,7 @@ def get_user(user_id: int):
 # ============================================
 # RAG System Tests
 # ============================================
+
 
 class TestRAGSystem:
     """Tests for the RAG retrieval system."""
@@ -170,26 +177,20 @@ class TestRAGSystem:
 # GitHub Client Tests
 # ============================================
 
+
 class TestGitHubClient:
     """Tests for the GitHub API client."""
 
     def test_pr_comment_structure(self):
         comment = PRComment(
-            path="src/main.py",
-            line=42,
-            body="Consider using a context manager here."
+            path="src/main.py", line=42, body="Consider using a context manager here."
         )
         assert comment.path == "src/main.py"
         assert comment.line == 42
         assert comment.side == "RIGHT"  # Default value
 
     def test_pr_comment_left_side(self):
-        comment = PRComment(
-            path="src/main.py",
-            line=10,
-            body="This was removed",
-            side="LEFT"
-        )
+        comment = PRComment(path="src/main.py", line=10, body="This was removed", side="LEFT")
         assert comment.side == "LEFT"
 
     def test_github_client_headers(self):
@@ -203,6 +204,7 @@ class TestGitHubClient:
 # Data Classes Tests
 # ============================================
 
+
 class TestDataClasses:
     """Tests for data classes."""
 
@@ -212,7 +214,7 @@ class TestDataClasses:
             severity="WARNING",
             category="security",
             issue="Potential vulnerability",
-            suggestion="Use parameterized query"
+            suggestion="Use parameterized query",
         )
         assert comment.line == 25
         assert comment.severity == "WARNING"
@@ -224,16 +226,13 @@ class TestDataClasses:
             severity="CRITICAL",
             line=42,
             description="SQL injection detected",
-            recommendation="Use parameterized queries"
+            recommendation="Use parameterized queries",
         )
         assert issue.type == "sql_injection"
         assert issue.severity == "CRITICAL"
 
     def test_file_review_result_defaults(self):
-        result = FileReviewResult(
-            filename="test.py",
-            summary="Looks good"
-        )
+        result = FileReviewResult(filename="test.py", summary="Looks good")
         assert result.filename == "test.py"
         assert result.line_comments == []
         assert result.security_issues == []
@@ -243,6 +242,7 @@ class TestDataClasses:
 # ============================================
 # Review Engine Tests
 # ============================================
+
 
 class TestReviewEngine:
     """Tests for the AI review engine."""
@@ -254,20 +254,22 @@ class TestReviewEngine:
             choices=[
                 MagicMock(
                     message=MagicMock(
-                        content=json.dumps({
-                            "summary": "Code looks good with minor suggestions.",
-                            "comments": [
-                                {
-                                    "line": 10,
-                                    "severity": "SUGGESTION",
-                                    "category": "style",
-                                    "issue": "Consider adding a docstring.",
-                                    "suggestion": "Add a docstring explaining the function purpose."
-                                }
-                            ],
-                            "security_issues": [],
-                            "style_suggestions": ["Add type hints"]
-                        })
+                        content=json.dumps(
+                            {
+                                "summary": "Code looks good with minor suggestions.",
+                                "comments": [
+                                    {
+                                        "line": 10,
+                                        "severity": "SUGGESTION",
+                                        "category": "style",
+                                        "issue": "Consider adding a docstring.",
+                                        "suggestion": "Add a docstring explaining the function purpose.",
+                                    }
+                                ],
+                                "security_issues": [],
+                                "style_suggestions": ["Add type hints"],
+                            }
+                        )
                     )
                 )
             ]
@@ -291,7 +293,7 @@ class TestReviewEngine:
                 "severity": "HIGH",
                 "line": 5,
                 "description": "Hardcoded password",
-                "recommendation": "Use env vars"
+                "recommendation": "Use env vars",
             }
         ]
         result = engine._parse_review_response("test.py", mock_openai_response, security_issues)
@@ -301,9 +303,7 @@ class TestReviewEngine:
 
     def test_parse_review_response_invalid_json(self):
         engine = ReviewEngine.__new__(ReviewEngine)
-        bad_response = MagicMock(
-            choices=[MagicMock(message=MagicMock(content="not valid json"))]
-        )
+        bad_response = MagicMock(choices=[MagicMock(message=MagicMock(content="not valid json"))])
         result = engine._parse_review_response("test.py", bad_response, [])
 
         # Should return fallback result, not crash
@@ -315,9 +315,7 @@ class TestReviewEngine:
         engine = ReviewEngine.__new__(ReviewEngine)
         guidelines = [
             GuidelineDocument(
-                id="test",
-                title="Test Guide",
-                content="Always test your code thoroughly."
+                id="test", title="Test Guide", content="Always test your code thoroughly."
             )
         ]
         prompt = engine._build_system_prompt(guidelines)
@@ -341,7 +339,7 @@ class TestReviewEngine:
             filename="app.py",
             patch="+def hello():\n+    print('hi')",
             file_content="def hello():\n    print('hi')",
-            security_issues=[]
+            security_issues=[],
         )
 
         assert "app.py" in prompt
@@ -350,9 +348,7 @@ class TestReviewEngine:
 
     def test_build_user_prompt_with_security_context(self):
         engine = ReviewEngine.__new__(ReviewEngine)
-        security_issues = [
-            {"line": 5, "description": "SQL injection", "severity": "CRITICAL"}
-        ]
+        security_issues = [{"line": 5, "description": "SQL injection", "severity": "CRITICAL"}]
         prompt = engine._build_user_prompt("db.py", "+query", "query code", security_issues)
 
         assert "Security Issues" in prompt
@@ -364,27 +360,32 @@ class TestReviewEngine:
 # Webhook helper tests
 # ============================================
 
+
 class TestWebhookHelpers:
     """Unit tests for the webhook module's helper functions."""
 
     def test_is_reviewable_file_python(self):
         from code_review_agent.main import is_reviewable_file
+
         assert is_reviewable_file("main.py") is True
         assert is_reviewable_file("src/utils/helper.py") is True
 
     def test_is_reviewable_file_typescript(self):
         from code_review_agent.main import is_reviewable_file
+
         assert is_reviewable_file("App.tsx") is True
         assert is_reviewable_file("components/Button.tsx") is True
 
     def test_is_reviewable_file_other_code(self):
         from code_review_agent.main import is_reviewable_file
+
         assert is_reviewable_file("Main.java") is True
         assert is_reviewable_file("app.go") is True
         assert is_reviewable_file("lib.rs") is True
 
     def test_is_not_reviewable_file(self):
         from code_review_agent.main import is_reviewable_file
+
         assert is_reviewable_file("README.md") is False
         assert is_reviewable_file("config.yaml") is False
         assert is_reviewable_file("image.png") is False
@@ -393,6 +394,7 @@ class TestWebhookHelpers:
 
     def test_generate_review_summary_basic(self):
         from code_review_agent.main import generate_review_summary
+
         summaries = ["File looks good", "Minor style issues"]
         result = generate_review_summary(summaries)
 
@@ -417,32 +419,29 @@ class TestWebhookHelpers:
 # Webhook Signature Verification Tests
 # ============================================
 
+
 class TestWebhookSecurity:
     """Tests for webhook security."""
 
     def test_verify_signature_valid(self):
-        from code_review_agent.main import verify_github_signature
-        import hmac
         import hashlib
-        import os
+        import hmac
 
         # Temporarily set secret
         secret = "test_secret_123"
         payload = b'{"action": "opened"}'
 
-        expected_sig = "sha256=" + hmac.new(
-            secret.encode(),
-            payload,
-            hashlib.sha256
-        ).hexdigest()
+        expected_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
         from code_review_agent import main
+
         with patch.object(main, "GITHUB_WEBHOOK_SECRET", secret):
             result = main.verify_github_signature(payload, expected_sig)
             assert result is True
 
     def test_verify_signature_no_secret_fails_closed(self, monkeypatch):
         from code_review_agent import main
+
         monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", None)
         monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", False)
         # With no secret configured, unsigned requests are rejected...
@@ -450,6 +449,7 @@ class TestWebhookSecurity:
 
     def test_verify_signature_no_secret_explicit_dev_mode(self, monkeypatch):
         from code_review_agent import main
+
         monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", None)
         monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", True)
         # ...unless unsigned webhooks are explicitly allowed for local development.
@@ -457,6 +457,7 @@ class TestWebhookSecurity:
 
     def test_verify_signature_invalid_rejected(self, monkeypatch):
         from code_review_agent import main
+
         monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", "test_secret_123")
         assert main.verify_github_signature(b'{"action": "opened"}', "sha256=" + "0" * 64) is False
         assert main.verify_github_signature(b'{"action": "opened"}', "") is False

@@ -27,15 +27,22 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "prs" / "py-sql-injection-00
 
 def comment(line, category="security", severity="CRITICAL", cited=None):
     return LineComment(
-        line=line, severity=severity, category=category, issue="x", suggestion="y",
+        line=line,
+        severity=severity,
+        category=category,
+        issue="x",
+        suggestion="y",
         cited_guideline_ids=list(cited or []),
     )
 
 
 def result(filename, comments, retrieved=None, parse_error=None):
     return FileReviewResult(
-        filename=filename, summary="", line_comments=list(comments),
-        retrieved_guideline_ids=list(retrieved or []), parse_error=parse_error,
+        filename=filename,
+        summary="",
+        line_comments=list(comments),
+        retrieved_guideline_ids=list(retrieved or []),
+        parse_error=parse_error,
     )
 
 
@@ -55,10 +62,12 @@ def make_fixture(expected, negatives=None, files=("a.py",)):
 
 class TestCorrectness:
     def test_duplicate_comments_do_not_inflate_recall(self):
-        fx = make_fixture([
-            ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
-            ExpectedIssue(file="a.py", line=40, category="security", severity="CRITICAL"),
-        ])
+        fx = make_fixture(
+            [
+                ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
+                ExpectedIssue(file="a.py", line=40, category="security", severity="CRITICAL"),
+            ]
+        )
         m = compute_correctness(fx, [result("a.py", [comment(10), comment(10), comment(11)])])
         assert m.recall == pytest.approx(0.5)
         assert m.true_positives == 1
@@ -81,15 +90,24 @@ class TestCorrectness:
         assert {(e.file, e.line) for e in m.unmatched_expected} == {("a.py", 10), ("a.py", 30)}
 
     def test_category_match_is_case_insensitive(self):
-        fx = make_fixture([ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")])
+        fx = make_fixture(
+            [ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")]
+        )
         m = compute_correctness(fx, [result("a.py", [comment(10, category="Security")])])
         assert m.true_positives == 1
 
     def test_line_tolerance(self):
-        fx = make_fixture([ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")])
+        fx = make_fixture(
+            [ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")]
+        )
         assert compute_correctness(fx, [result("a.py", [comment(13)])]).true_positives == 1
         assert compute_correctness(fx, [result("a.py", [comment(14)])]).true_positives == 0
-        assert compute_correctness(fx, [result("a.py", [comment(14)])], line_tolerance=4).true_positives == 1
+        assert (
+            compute_correctness(
+                fx, [result("a.py", [comment(14)])], line_tolerance=4
+            ).true_positives
+            == 1
+        )
 
     def test_clean_fixture_rates_are_undefined_not_zero(self):
         fx = make_fixture([])
@@ -104,7 +122,9 @@ class TestCorrectness:
     def test_line_scoped_negative_assertion(self):
         fx = make_fixture(
             [ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")],
-            negatives=[NegativeAssertion(file="a.py", category="security", line=18, line_tolerance=3)],
+            negatives=[
+                NegativeAssertion(file="a.py", category="security", line=18, line_tolerance=3)
+            ],
         )
         m = compute_correctness(fx, [result("a.py", [comment(10), comment(18), comment(40)])])
         assert m.true_positives == 1
@@ -112,10 +132,12 @@ class TestCorrectness:
         assert m.negative_assertion_violations[0].comment.line == 18
 
     def test_summary_across_runs(self):
-        fx = make_fixture([
-            ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
-            ExpectedIssue(file="a.py", line=40, category="security", severity="CRITICAL"),
-        ])
+        fx = make_fixture(
+            [
+                ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
+                ExpectedIssue(file="a.py", line=40, category="security", severity="CRITICAL"),
+            ]
+        )
         runs = [[result("a.py", [comment(10), comment(40)])], [result("a.py", [comment(10)])]]
         s = summarize_correctness([compute_correctness(fx, r) for r in runs])
         assert s["runs"] == 2
@@ -125,15 +147,19 @@ class TestCorrectness:
 
     def test_maximum_matching_not_greedy(self):
         # Greedy closest-first would pair 11 with 10 and leave 8 unmatched.
-        fx = make_fixture([
-            ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
-            ExpectedIssue(file="a.py", line=14, category="security", severity="CRITICAL"),
-        ])
+        fx = make_fixture(
+            [
+                ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
+                ExpectedIssue(file="a.py", line=14, category="security", severity="CRITICAL"),
+            ]
+        )
         m = compute_correctness(fx, [result("a.py", [comment(11), comment(8)])])
         assert (m.true_positives, m.false_positives, m.duplicate_findings) == (2, 0, 0)
 
     def test_empty_run_scores_f1_zero_not_undefined(self):
-        fx = make_fixture([ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")])
+        fx = make_fixture(
+            [ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL")]
+        )
         found = compute_correctness(fx, [result("a.py", [comment(10)])])
         empty = compute_correctness(fx, [result("a.py", [])])
         assert empty.precision is None and empty.recall == 0.0 and empty.f1 == 0.0
@@ -144,10 +170,12 @@ class TestCorrectness:
         assert s["pooled"]["precision"] == pytest.approx(1.0)
 
     def test_severity_weight_is_case_insensitive(self):
-        fx = make_fixture([
-            ExpectedIssue(file="a.py", line=10, category="security", severity="critical"),
-            ExpectedIssue(file="a.py", line=40, category="style", severity="SUGGESTION"),
-        ])
+        fx = make_fixture(
+            [
+                ExpectedIssue(file="a.py", line=10, category="security", severity="critical"),
+                ExpectedIssue(file="a.py", line=40, category="style", severity="SUGGESTION"),
+            ]
+        )
         m = compute_correctness(fx, [result("a.py", [comment(10)])])
         assert m.severity_weighted_recall == pytest.approx(5 / 6)
 
@@ -220,15 +248,27 @@ class TestConsistency:
 
 class TestCitation:
     def fixture(self):
-        return make_fixture([
-            ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL",
-                          must_cite=["python_best_practices"]),
-        ])
+        return make_fixture(
+            [
+                ExpectedIssue(
+                    file="a.py",
+                    line=10,
+                    category="security",
+                    severity="CRITICAL",
+                    must_cite=["python_best_practices"],
+                ),
+            ]
+        )
 
     def test_retrieved_and_cited(self):
         fx = self.fixture()
-        run = [result("a.py", [comment(10, cited=["python_best_practices"])],
-                      retrieved=["python_best_practices", "typescript_react_standards"])]
+        run = [
+            result(
+                "a.py",
+                [comment(10, cited=["python_best_practices"])],
+                retrieved=["python_best_practices", "typescript_react_standards"],
+            )
+        ]
         checks = compute_citation_checks(fx, run, compute_correctness(fx, run))
         assert checks.retrieved_rate == 1.0
         assert checks.cited_rate == 1.0
@@ -254,8 +294,13 @@ class TestCitation:
 
     def test_grounding_tasks_carry_ids(self):
         fx = self.fixture()
-        run = [result("a.py", [comment(10, cited=["python_best_practices"])],
-                      retrieved=["python_best_practices"])]
+        run = [
+            result(
+                "a.py",
+                [comment(10, cited=["python_best_practices"])],
+                retrieved=["python_best_practices"],
+            )
+        ]
         tasks = emit_grounding_tasks(fx, run)
         assert len(tasks) == 1
         assert tasks[0].cited_guideline_ids == ["python_best_practices"]
@@ -277,8 +322,9 @@ class TestBundledFixture:
         assert 'query = f"SELECT' in ff.content.split("\n")[expected.line - 1]
 
     def test_must_cite_names_a_guideline_that_loads(self):
-        from code_review_agent.rag_system import RAGSystem
         import asyncio
+
+        from code_review_agent.rag_system import RAGSystem
 
         rag = RAGSystem()
         asyncio.run(rag._load_guidelines())
@@ -293,10 +339,17 @@ class TestBundledFixture:
 
 class TestRunnerOffline:
     def test_mock_run_writes_reports(self, tmp_path):
-        code = runner_main([
-            "--fixture", str(FIXTURE_PATH), "--mock-llm", "--repeats", "2",
-            "--report", str(tmp_path),
-        ])
+        code = runner_main(
+            [
+                "--fixture",
+                str(FIXTURE_PATH),
+                "--mock-llm",
+                "--repeats",
+                "2",
+                "--report",
+                str(tmp_path),
+            ]
+        )
         assert code == 0
         report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
         meta = report["run_metadata"]
@@ -322,9 +375,16 @@ class TestRunnerOffline:
         assert (tmp_path / "summary.md").exists()
 
     def test_mock_run_rag_off(self, tmp_path):
-        code = runner_main([
-            "--fixture", str(FIXTURE_PATH), "--mock-llm", "--no-rag", "--report", str(tmp_path),
-        ])
+        code = runner_main(
+            [
+                "--fixture",
+                str(FIXTURE_PATH),
+                "--mock-llm",
+                "--no-rag",
+                "--report",
+                str(tmp_path),
+            ]
+        )
         assert code == 0
         report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
         assert report["run_metadata"]["rag_enabled"] is False
@@ -344,10 +404,17 @@ class TestRunnerOffline:
             return await original(self, *args, **kwargs)
 
         monkeypatch.setattr(mock_llm._Completions, "create", flaky)
-        code = runner_main([
-            "--fixture", str(FIXTURE_PATH), "--mock-llm", "--repeats", "3",
-            "--report", str(tmp_path),
-        ])
+        code = runner_main(
+            [
+                "--fixture",
+                str(FIXTURE_PATH),
+                "--mock-llm",
+                "--repeats",
+                "3",
+                "--report",
+                str(tmp_path),
+            ]
+        )
         assert code == 3
         report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
         assert report["failed_runs"] == [0] and report["reference_run"] == 1
@@ -361,7 +428,10 @@ class TestRunnerOffline:
         data["fixture_id"] = "py-sqli-v1.0"
         path = tmp_path / "fx.json"
         path.write_text(json.dumps(data))
-        assert runner_main(["--fixture", str(path), "--mock-llm", "--report", str(tmp_path / "r")]) == 0
+        assert (
+            runner_main(["--fixture", str(path), "--mock-llm", "--report", str(tmp_path / "r")])
+            == 0
+        )
         assert (tmp_path / "r" / "py-sqli-v1.0.json").exists()
 
     def test_unsafe_fixture_id_rejected(self, tmp_path):
@@ -375,8 +445,17 @@ class TestRunnerOffline:
     @pytest.mark.parametrize("flag,value", [("--repeats", "0"), ("--line-tolerance", "-1")])
     def test_invalid_arguments_rejected(self, tmp_path, flag, value):
         with pytest.raises(SystemExit):
-            runner_main(["--fixture", str(FIXTURE_PATH), "--mock-llm", flag, value,
-                         "--report", str(tmp_path)])
+            runner_main(
+                [
+                    "--fixture",
+                    str(FIXTURE_PATH),
+                    "--mock-llm",
+                    flag,
+                    value,
+                    "--report",
+                    str(tmp_path),
+                ]
+            )
 
     def test_live_run_without_credentials_exits_cleanly(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
