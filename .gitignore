@@ -75,3 +75,6 @@ dmypy.json
 
 # Security
 bandit-report.json
+
+# Evaluation output
+reports/

@@ -1,0 +1,26 @@
+{
+  "fixture_id": "py-silent-except-002",
+  "language": "python",
+  "description": "PR adds a settings loader whose bare except swallows every error. The static scanner has no pattern for this, so it is the fixture that can show whether retrieval changes what the model finds. Expected: a WARNING-level bug finding on the bare except at line 10, citing the Python guideline's error-handling rules.",
+  "files": [
+    {
+      "path": "src/settings.py",
+      "language": "python",
+      "patch": "@@ -1,4 +1,15 @@\n import json\n+\n+\n+def load_settings(path):\n+    \"\"\"Read settings from a JSON file. NOTE: swallows every error.\"\"\"\n+    settings = {}\n+    try:\n+        with open(path) as handle:\n+            settings = json.load(handle)\n+    except:\n+        pass\n+    return settings\n \n \n def merge_settings(base, override):\n",
+      "content": "import json\n\n\ndef load_settings(path):\n    \"\"\"Read settings from a JSON file. NOTE: swallows every error.\"\"\"\n    settings = {}\n    try:\n        with open(path) as handle:\n            settings = json.load(handle)\n    except:\n        pass\n    return settings\n\n\ndef merge_settings(base, override):\n    \"\"\"Merge two settings dictionaries, with override winning.\"\"\"\n    merged = dict(base)\n    merged.update(override)\n    return merged\n"
+    }
+  ],
+  "expected_issues": [
+    {
+      "file": "src/settings.py",
+      "line": 10,
+      "category": "bug",
+      "severity": "WARNING",
+      "issue_type": "silent_exception",
+      "must_cite": [
+        "python_best_practices"
+      ]
+    }
+  ],
+  "negative_assertions": []
+}

@@ -102,8 +102,9 @@ def number_lines(text: str) -> str:
 
 class SecurityScanner:
     """
-    Static security scanner that detects common vulnerabilities.
-    Implements pattern-based security analysis for various languages.
+    Static security scanner over a fixed catalog of regular expressions
+    covering several languages. There is no language dispatch: every pattern
+    runs on every file.
 
     Patterns are matched line by line and case-insensitively, except where a
     pattern scopes case sensitivity itself with ``(?-i:...)``.
@@ -141,7 +142,12 @@ class SecurityScanner:
                 "SQL query built by string concatenation",
             ),
             (r'query\s*=\s*f["\']SELECT.*?\{', "SQL query with f-string interpolation"),
-            (r"\.format\s*\([^)]*\).*?execute", "SQL query with .format() method"),
+            # A SQL literal with a {} placeholder, formatted with .format(),
+            # whether or not execute() appears on the same line.
+            (
+                r'["\'][^"\']*\b(?:SELECT|INSERT|UPDATE|DELETE)\b[^"\']*\{[^"\']*["\']\s*\.\s*format\s*\(',
+                "SQL query built with .format()",
+            ),
         ],
         "command_injection": [
             # A + inside the call, allowing one level of nested parentheses.
@@ -358,7 +364,10 @@ Line numbers refer to the numbered file content in the user message. When a comm
 
 Be constructive, specific, and actionable. Focus on high-impact issues."""
 
-    # Severity ranking for prompt prioritization (lower number = higher priority).
+    # Severity ranking for prompt prioritization (lower number = higher
+    # priority); findings of equal severity are ordered by line. Every current
+    # vulnerability class is CRITICAL or HIGH, so MEDIUM and LOW are here for
+    # classes that may be added later.
     _SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
     def _build_user_prompt(
@@ -371,7 +380,10 @@ Be constructive, specific, and actionable. Focus on high-impact issues."""
             # important findings, not whatever the regex catalog matched first.
             sorted_issues = sorted(
                 security_issues,
-                key=lambda i: self._SEVERITY_RANK.get(i.get("severity", "LOW"), 99),
+                key=lambda i: (
+                    self._SEVERITY_RANK.get(i.get("severity", "LOW"), 99),
+                    i.get("line", 0),
+                ),
             )
             security_context = "\n**Pre-identified Security Issues:**\n"
             for issue in sorted_issues[:MAX_SCANNER_FINDINGS_IN_PROMPT]:

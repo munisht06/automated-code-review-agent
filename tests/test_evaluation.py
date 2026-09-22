@@ -523,3 +523,127 @@ class TestRunnerOffline:
         assert code == 2
         err = capsys.readouterr().err
         assert "AZURE_OPENAI_KEY" in err and "--mock-llm" in err
+
+
+# ---- guards that keep a degenerate run from scoring as agreement ---------------
+
+
+class TestConsistencyGuards:
+    def test_two_empty_runs_agree_and_an_empty_run_does_not_agree_with_findings(self):
+        empty = [result("a.py", [])]
+        assert compute_consistency([empty, empty]).mean_jaccard == pytest.approx(1.0)
+        runs = [empty, [result("a.py", [comment(10), comment(20)])]]
+        assert compute_consistency(runs).mean_jaccard == 0.0
+
+    def test_a_partly_parsed_run_is_still_scored(self):
+        # parse_error with comments kept is a partial parse, not a failure.
+        partial = [result("a.py", [comment(10)], parse_error="dropped 1 malformed comment(s)")]
+        runs = [partial, [result("a.py", [comment(10)])]]
+        c = compute_consistency(runs)
+        assert (c.runs_scored, c.excluded_parse_failures) == (2, 0)
+        assert c.mean_jaccard == pytest.approx(1.0)
+
+
+class TestNegativeAssertionBoundary:
+    @pytest.mark.parametrize("line,violations", [(13, 1), (14, 0)])
+    def test_line_scoped_assertion_stops_at_its_tolerance(self, line, violations):
+        fx = make_fixture(
+            [],
+            negatives=[
+                NegativeAssertion(file="a.py", category="security", line=12, line_tolerance=1)
+            ],
+        )
+        m = compute_correctness(fx, [result("a.py", [comment(line)])])
+        assert len(m.negative_assertion_violations) == violations
+
+
+class TestGroundingAggregation:
+    def test_labels_become_applicability_and_specificity(self):
+        from code_review_agent.evaluation.metrics import (
+            GroundingTask,
+            aggregate_grounding_labels,
+        )
+
+        tasks = [
+            GroundingTask("t", "a.py", 1, "c", ["g1"], ["g1"], applicable=True, specific=True),
+            GroundingTask("t", "a.py", 2, "c", ["g1"], ["g1"], applicable=False),
+            GroundingTask("t", "a.py", 3, "c", [], ["g1"]),
+        ]
+        m = aggregate_grounding_labels(tasks)
+        assert m.citation_rate == pytest.approx(2 / 3)
+        assert m.citation_applicability == pytest.approx(0.5)
+        assert m.citation_specificity == pytest.approx(1.0)
+        assert (m.n_labeled_applicable, m.n_labeled_specific) == (2, 1)
+
+    def test_no_labels_leaves_applicability_undefined(self):
+        from code_review_agent.evaluation.metrics import aggregate_grounding_labels
+
+        fx = make_fixture([])
+        tasks = emit_grounding_tasks(fx, [result("a.py", [comment(10, cited=["g1"])])])
+        m = aggregate_grounding_labels(tasks)
+        assert m.citation_rate == 1.0
+        assert m.citation_applicability is None and m.citation_specificity is None
+
+
+# ---- the second fixture: the scanner cannot see its issue ----------------------
+
+
+class TestScannerSilentFixture:
+    PATH = Path(__file__).parent / "fixtures" / "prs" / "py-silent-except-002.json"
+
+    def test_scanner_finds_nothing_so_retrieval_can_be_tested(self):
+        from code_review_agent.github_client import commentable_lines
+        from code_review_agent.review_engine import SecurityScanner
+
+        fx = load_fixture(self.PATH)
+        content = fx.files[0].content
+        assert SecurityScanner.scan(content) == []
+        issue = fx.expected_issues[0]
+        assert content.split("\n")[issue.line - 1].strip() == "except:"
+        assert issue.line in commentable_lines(fx.files[0].patch)
+
+    def test_mock_run_records_the_miss_rather_than_hiding_it(self, tmp_path):
+        assert (
+            runner_main(["--fixture", str(self.PATH), "--mock-llm", "--report", str(tmp_path)]) == 0
+        )
+        report = json.loads((tmp_path / "py-silent-except-002.json").read_text())
+        # The scanner-echo stand-in has nothing to echo here.
+        assert report["correctness_per_run"][0]["recall"] == 0.0
+        assert any("stand-in" in note for note in report["caveats"])
+
+
+class TestReportCaveats:
+    def test_mock_and_full_corpus_caveats_are_in_the_report(self, tmp_path):
+        runner_main(["--fixture", str(FIXTURE_PATH), "--mock-llm", "--report", str(tmp_path)])
+        report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
+        text = (tmp_path / "py-sql-injection-001.md").read_text()
+        assert any("not a model" in note for note in report["caveats"])
+        assert any("by construction" in note for note in report["caveats"])
+        assert "**Caveat:**" in text and "**Caveat:**" in (tmp_path / "summary.md").read_text()
+
+    def test_rag_off_caveat_replaces_the_corpus_one(self, tmp_path):
+        runner_main(
+            ["--fixture", str(FIXTURE_PATH), "--mock-llm", "--no-rag", "--report", str(tmp_path)]
+        )
+        report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
+        assert any("RAG is off" in note for note in report["caveats"])
+        assert not any("retrieved rate is 1.0" in note for note in report["caveats"])
+
+    def test_single_run_has_no_consistency_section(self, tmp_path):
+        runner_main(["--fixture", str(FIXTURE_PATH), "--mock-llm", "--report", str(tmp_path)])
+        report = json.loads((tmp_path / "py-sql-injection-001.json").read_text())
+        assert "consistency" not in report
+
+
+class TestProvenanceGuard:
+    def test_commit_is_not_reported_from_an_unrelated_checkout(self, monkeypatch):
+        from code_review_agent.evaluation import runner as runner_mod
+
+        monkeypatch.setattr(runner_mod, "_git", lambda *cmd: "/some/other/repo\n")
+        assert runner_mod.git_state() == {"git_commit": None, "git_uncommitted_changes": None}
+
+    def test_commit_is_reported_from_this_checkout(self):
+        from code_review_agent.evaluation.runner import git_state
+
+        state = git_state()
+        assert set(state) == {"git_commit", "git_uncommitted_changes"}

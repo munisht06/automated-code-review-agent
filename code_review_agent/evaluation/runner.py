@@ -132,6 +132,11 @@ def git_state() -> dict:
     """The commit the code came from, and whether the package, the guideline
     corpus or the fixtures differ from it, counting new untracked files there.
     Other paths, such as a reports directory, are ignored."""
+    toplevel = _git("rev-parse", "--show-toplevel")
+    if not toplevel or Path(toplevel.strip()).resolve() != PROJECT_ROOT:
+        # An installed copy can sit inside an unrelated checkout, whose commit
+        # would say nothing about the code that ran.
+        return {"git_commit": None, "git_uncommitted_changes": None}
     commit = _git("rev-parse", "HEAD")
     status = _git(
         "status", "--porcelain", "--", "code_review_agent", "guidelines", "tests/fixtures"
@@ -195,7 +200,7 @@ def _file_provenance(runs: list[list[FileReviewResult]]) -> list:
 
 
 def score_fixture(
-    fixture: Fixture, runs: list[list[FileReviewResult]], line_tolerance: int
+    fixture: Fixture, runs: list[list[FileReviewResult]], line_tolerance: int, meta: dict
 ) -> dict:
     """Score all runs of one fixture into a report payload.
 
@@ -232,9 +237,39 @@ def score_fixture(
         "grounding_summary_reference_run": aggregate_grounding_labels(tasks).to_dict(),
         "files_per_run": _file_provenance(runs),
     }
+    payload["caveats"] = caveats(meta)
     if len(runs) > 1:
         payload["consistency"] = compute_consistency(runs, line_tolerance).to_dict()
     return payload
+
+
+def caveats(meta: dict) -> list[str]:
+    """Reasons a number in this report means less than it looks like.
+
+    They are written into the report itself, not left in EVALUATION.md, so a
+    score is never read without the conditions that produced it.
+    """
+    notes = []
+    if str(meta.get("mode", "")).startswith("mock"):
+        notes.append(
+            "Offline mode: the stand-in echoes the static scanner's findings instead of "
+            "calling a model, so these scores measure the harness, not a model, and "
+            "consistency is perfect because the stand-in is deterministic."
+        )
+    corpus = meta.get("corpus_guideline_ids") or []
+    if meta.get("rag_enabled") and corpus and meta.get("top_k", 0) >= len(corpus):
+        notes.append(
+            f"top_k ({meta['top_k']}) is at least the size of the loaded corpus "
+            f"({len(corpus)}), so every guideline is retrieved for every file: retrieval "
+            "never excludes anything and the required-guideline retrieved rate is 1.0 by "
+            "construction."
+        )
+    if not meta.get("rag_enabled"):
+        notes.append(
+            "RAG is off: no guidelines reach the prompt, so citation rates are 0 by "
+            "construction."
+        )
+    return notes
 
 
 def _fmt(x) -> str:
@@ -254,6 +289,8 @@ def _render_markdown(payload: dict, meta: dict) -> str:
         out.append(
             f"- Runs with a failed review call, excluded from scoring: {payload['failed_runs']}"
         )
+    for note in payload.get("caveats", []):
+        out.append(f"- **Caveat:** {note}")
     out.append("")
     s = payload["correctness_across_runs"]
     out.append("## Correctness")
@@ -362,6 +399,8 @@ def _write_summary(report_dir: Path, rows: list, meta: dict) -> None:
     out.append(f"- Repeats per fixture: {meta['repeats']}")
     dirty = " (with uncommitted changes)" if meta.get("git_uncommitted_changes") else ""
     out.append(f"- Commit: {_fmt(meta['git_commit'])}{dirty}")
+    for note in caveats(meta):
+        out.append(f"- **Caveat:** {note}")
     out.append("")
     out.append(
         "| Fixture | Precision (mean) | Recall (mean) | F1 (mean) | Severity-weighted recall (mean) |"
@@ -409,7 +448,7 @@ async def amain(args: argparse.Namespace) -> int:
         print(f"== {fixture.fixture_id} ==")
         runs = await run_repeats(fixture, engine, args.repeats)
         meta = run_metadata(args, engine, git)
-        payload = score_fixture(fixture, runs, args.line_tolerance)
+        payload = score_fixture(fixture, runs, args.line_tolerance, meta)
         write_reports(report_dir, payload, meta)
         rows.append((fixture.fixture_id, payload["correctness_across_runs"]))
         failed_runs += len(payload["failed_runs"])

@@ -411,8 +411,11 @@ class TestWebhookHelpers:
         ]
         result = generate_review_summary(["Review done"], security_issues)
 
-        assert "Security" in result
+        # The finding is listed with its location and the fix, not just counted.
         assert "CRITICAL" in result
+        assert "sql_injection" in result
+        assert "line 10" in result
+        assert "SQL injection" in result and "Fix it" in result
 
 
 # ============================================

@@ -412,10 +412,12 @@ def compute_consistency(
     Score variance across N repeat agent runs over the same fixture input.
 
     ``runs`` is a sequence of run-outputs; each run-output is a sequence of
-    FileReviewResult objects. Findings are (file, category, line) triples and
-    two findings in different runs are the same finding if file and category
-    agree and lines are within ``line_tolerance``, the same rule correctness
-    uses. Jaccard is averaged over all pairs of scored runs.
+    FileReviewResult objects. Findings are (file, category, line, severity)
+    tuples, and two findings in different runs are the same finding if file
+    and category agree and lines are within ``line_tolerance``, the same rule
+    correctness uses; severity is not part of that identity, only a tie-break
+    and the thing severity stability measures. Jaccard is averaged over all
+    pairs of scored runs.
     """
     metrics = ConsistencyMetrics(runs=len(runs), line_tolerance=line_tolerance)
     scored = []

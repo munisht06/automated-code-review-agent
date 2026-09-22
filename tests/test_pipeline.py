@@ -249,6 +249,8 @@ class TestScannerPrecisionGuards:
             "data = read_file(username)",
             'AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]',
             'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
+            'label = "Select one".format()',
+            'msg = "Deleted {} rows".format(n)',
         ],
     )
     def test_not_flagged(self, code):
@@ -271,6 +273,8 @@ class TestScannerPrecisionGuards:
             ('os.system(" ".join(args) + " " + user_input)', "command_injection"),
             ('sql = "SELECT " + ", ".join(cols) + " FROM t WHERE id = " + uid', "sql_injection"),
             ('q = "UPDATE " + table + " SET name = \'" + name + "\'"', "sql_injection"),
+            ('cursor.execute("SELECT * FROM t WHERE id = {}".format(uid))', "sql_injection"),
+            ('q = "SELECT * FROM t WHERE id = {}".format(uid)', "sql_injection"),
         ],
     )
     def test_flagged(self, code, vuln):
@@ -480,3 +484,89 @@ def test_summary_counts_what_it_leaves_out():
         style_suggestions=[f"s{i}" for i in range(12)],
     )
     assert "...and 5 more" in text and "...and 2 more" in text
+
+
+# ---- GitHub client HTTP behavior ------------------------------------------------
+
+
+def test_get_pr_files_follows_pagination(monkeypatch):
+    from code_review_agent import github_client as gh
+
+    pages = {
+        1: [{"filename": f"f{i}.py"} for i in range(gh.GitHubClient.PER_PAGE)],
+        2: [{"filename": "last.py"}],
+    }
+    seen = []
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            seen.append(params["page"])
+            return FakeResponse(pages.get(params["page"], []))
+
+    monkeypatch.setattr(gh.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    files = asyncio.run(gh.GitHubClient("t").get_pr_files("o/r", 1))
+    assert len(files) == gh.GitHubClient.PER_PAGE + 1
+    assert seen == [1, 2]  # stopped as soon as a page came back short
+
+
+# ---- summary and health ---------------------------------------------------------
+
+
+def test_high_severity_findings_are_listed_too():
+    from code_review_agent.main import generate_review_summary
+    from code_review_agent.review_engine import SecurityIssue
+
+    issues = [
+        SecurityIssue("hardcoded_secret", "HIGH", 7, "Hardcoded token detected", "Use env vars"),
+        SecurityIssue("sql_injection", "CRITICAL", 4, "SQL injection", "Parameterize"),
+    ]
+    text = generate_review_summary(["note"], issues)
+    # Highest severity first, and both findings survive with their locations.
+    assert text.index("sql_injection") < text.index("hardcoded_secret")
+    assert "line 7" in text and "Use env vars" in text
+
+
+def test_health_reports_whether_the_service_is_configured(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from code_review_agent import main
+
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_KEY", raising=False)
+    monkeypatch.setattr(main, "GITHUB_TOKEN", "")
+    monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", None)
+    monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", False)
+    body = TestClient(main.app).get("/health").json()
+    assert body["status"] == "healthy"
+    assert body["azure_openai_configured"] is False
+    assert body["github_token_configured"] is False
+    assert body["webhook_signature_required"] is True
+    assert not any("key" in str(v).lower() for v in body.values())  # no secrets echoed
+
+
+# ---- corpus ids ------------------------------------------------------------------
+
+
+def test_guideline_ids_keep_subfolders_distinct(tmp_path):
+    for folder in ("security", "style"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "python.md").write_text(f"# {folder}\n- rule\n")
+    rag = RAGSystem(guidelines_path=tmp_path)
+    asyncio.run(rag._load_guidelines())
+    assert sorted(g.id for g in rag.guidelines) == ["security/python", "style/python"]

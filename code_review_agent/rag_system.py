@@ -92,13 +92,19 @@ class RAGSystem:
         """Load guidelines from the markdown files under ``guidelines_path``."""
         self.guidelines = []
 
-        # Load from files if they exist
+        # Load from files if they exist. Sorted, so the corpus order (and any
+        # exact similarity tie) does not depend on the filesystem.
         if self.guidelines_path.exists():
-            for file in self.guidelines_path.glob("**/*.md"):
+            for file in sorted(self.guidelines_path.glob("**/*.md")):
                 content = file.read_text()
+                # The id is the path relative to the corpus root, without the
+                # extension, so guidelines/security/python.md and
+                # guidelines/style/python.md stay distinct ids. For a file
+                # directly under guidelines/ this is just its stem.
+                relative = file.relative_to(self.guidelines_path).with_suffix("")
                 self.guidelines.append(
                     GuidelineDocument(
-                        id=file.stem,
+                        id=relative.as_posix(),
                         title=file.stem.replace("_", " ").title(),
                         content=content,
                         language=self._detect_guideline_language(file.stem),
@@ -292,8 +298,9 @@ class RAGSystem:
 
         Guideline files are named for their language (``python_best_practices``,
         ``typescript_react_standards``) rather than given a source-file
-        extension, so ``_detect_language`` cannot be used on them: it returns
-        ``None`` for every guideline, and the language-match boost never applies.
+        extension. ``_detect_language`` keys off extensions, so it would return
+        ``None`` for every guideline and the language-match boost would never
+        fire; this function reads the name's prefix instead.
         """
         prefixes = {
             "python": "python",
@@ -332,7 +339,12 @@ class RAGSystem:
 
 
 class GuidelineManager:
-    """Manage custom guidelines for specific repositories."""
+    """Store and load per-repository guideline overrides.
+
+    Not wired into the runtime path: nothing in ``main.py`` or
+    ``RAGSystem.initialize`` loads these, so a deployment's reviews still use
+    the bundled corpus. It exists as a hook for the multi-tenant case.
+    """
 
     def __init__(self, storage_path: str = "repo_guidelines"):
         self.storage_path = Path(storage_path)
