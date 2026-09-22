@@ -3,8 +3,6 @@
 > A research prototype for retrieval-grounded LLM code review on GitHub pull requests.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Azure OpenAI](https://img.shields.io/badge/Azure-OpenAI-0078D4.svg)](https://azure.microsoft.com/en-us/products/ai-services)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 This repository holds an in-progress prototype and a written evaluation design for asking whether retrieval-augmented LLM workflows can deliver code review that is consistent, auditable, and grounded enough to be trustworthy in software-engineering practice. It is a research prototype, not a polished tool, and it reports no benchmark results yet. The evaluation design is still being revised; every change is logged in [`EVALUATION.md`](./EVALUATION.md).
@@ -39,30 +37,6 @@ The system is an event-driven service that listens for GitHub pull-request event
 
 The pipeline is decomposed into stages. Retrieval can be switched off today (`--no-rag` in the evaluation harness); a scanner-off switch is planned.
 
-```text
-PR event  →  HMAC signature verification  →  diff fetch  →  per-file routing
-                                                              │
-                ┌─────────────────────────────────────────────┤
-                ▼                                             ▼
-         Static security pass                          RAG retrieval
-         (regex catalog over                           (embedding-based
-          documented patterns)                          similarity over
-                                                        guidelines corpus)
-                │                                             │
-                └─────────────────────┬───────────────────────┘
-                                      ▼
-                              Prompt orchestration
-                          (system role + retrieved
-                           context + scanner findings
-                           + diff + structured-output
-                           contract)
-                                      ▼
-                                LLM inference
-                                      ▼
-                          JSON review payload
-                                      ▼
-                       Structured PR comments posted
-```
 
 A more detailed component description, including the runtime data flow and the boundary between deterministic and stochastic stages, is in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
@@ -98,9 +72,9 @@ A planned refactor would move `SecurityScanner` out of `review_engine.py` into i
 
 The evaluation framework targets four questions:
 
-- **Correctness.** On labeled PR fixtures with known-good and known-bad patterns (currently one fixture), what fraction of injected issues does the agent surface? What fraction of its findings are false positives?
+- **Correctness.** On labeled PR fixtures with known-good and known-bad patterns (currently two fixtures), what fraction of injected issues does the agent surface? What fraction of its findings are false positives?
 - **Grounding fidelity.** When the agent cites a guideline, does the cited guideline actually apply to the code it is commenting on? Structural checks run automatically (was the required guideline retrieved, and did the matching comment cite it); applicability is judged on a hand-labeled subset.
-- **RAG ablation.** How much of the agent's correctness depends on retrieval grounding? Each configuration is one harness run (`--no-rag` for the RAG-off arm) and the two reports are compared. With the bundled two-document corpus, retrieval returns every guideline, so today this compares all guidelines against none; [`EVALUATION.md`](./EVALUATION.md) lists this and the other known confounds.
+- **RAG ablation.** How much of the agent's correctness depends on retrieval grounding? Each configuration is one harness run (`--no-rag` for the RAG-off arm); the two reports are compared by hand, since the harness has no comparison command yet. With the bundled two-document corpus, retrieval returns every guideline, so today this compares all guidelines against none; [`EVALUATION.md`](./EVALUATION.md) lists this and the other known confounds.
 - **Consistency under repeat.** Run each fixture *N* times. How often does the agent produce the same set of findings? This is to be measured first: until run-to-run spread is known, a difference between configurations cannot be separated from noise.
 
 Numerical results are not yet committed; the harness is in place, and benchmark dataset construction is the active workstream. See [`EVALUATION.md`](./EVALUATION.md) for the experiment design and current status.
@@ -111,7 +85,7 @@ This is a research prototype, and the limitations matter as much as the design c
 
 - **Retrieval surface is one corpus, not two.** The current RAG layer embeds and retrieves over the curated standards corpus in `guidelines/`. It does not retrieve over the surrounding repository — caller and callee files, related modules, recent commit history. *Code-context retrieval* in the strong sense is on the roadmap, not in `main`.
 - **The bundled corpus is small and generic.** Two short, generic best-practice documents stand in for a team-specific corpus, each embedded as one chunk. With `top_k=3`, every guideline is retrieved for every file, so retrieval orders the guidelines but never excludes one, and grounding cannot yet be separated from what the model already knows. Section-level chunks and team-specific conventions the model cannot know are the next steps.
-- **Prompt budgets.** Each retrieved guideline (4,000 characters), the diff (2,000) and the file content (4,000) are capped before they enter the prompt. A cut is made at a line break where possible, marked in the prompt and recorded in the evaluation report. An earlier 500-character guideline cap silently removed the security section of both guidelines, so the SQL-injection fixture never saw the guidance it is meant to cite; that is why prompt cuts are no longer silent. Three cuts remain unmarked because they affect retrieval or scanning, not the prompt: the retrieval query uses the first 1,000 characters of the file, embedding inputs are capped at 8,000, and the static scanner reads the first 2,000 characters of each line. Both bundled guidelines are under 2,700 characters.
+- **Prompt budgets.** Each retrieved guideline (4,000 characters), the diff (2,000) and the file content (4,000) are capped before they enter the prompt. A cut is made at a line break where possible, marked in the prompt and recorded in the evaluation report. An earlier 500-character guideline cap silently removed the security section of both guidelines, so the SQL-injection fixture never saw the guidance it is meant to cite; that is why prompt cuts are no longer silent. Three cuts remain unmarked because they affect retrieval or scanning, not the prompt: the retrieval query uses the first 1,000 characters of the file, embedding inputs are capped at 8,000, and the static scanner reads the first 2,000 characters of each line. Both bundled guidelines fit the 4,000-character budget whole, which a test pins.
 - **Static scanner is regex-based.** The `SecurityScanner` covers documented patterns (injection, hardcoded secrets, XSS, command injection, path traversal). It will not catch dataflow-dependent vulnerabilities, and its precision has not been measured. This is a deliberate trade-off (auditability over coverage), but it bounds what the system can claim about security review.
 - **Per-file processing is sequential.** Within a single PR, files are reviewed in a serial loop. Concurrency is currently per-PR (FastAPI background tasks dispatching different PRs in parallel). Adding bounded per-file concurrency with explicit rate-limit awareness is a planned change.
 - **No queue or back-pressure.** The system uses FastAPI's in-process `BackgroundTasks` for review work. It is not durable; restarts lose in-flight reviews. A real task queue (Celery, dramatiq, or similar) is required for serious deployment but is out of scope for the prototype.
@@ -119,7 +93,7 @@ This is a research prototype, and the limitations matter as much as the design c
 - **No human evaluator study.** The evaluation harness measures programmatic properties (correctness on fixtures, grounding citations, repeat consistency). It does not yet measure perceived usefulness from a working engineer's perspective. Designing that study is part of the work.
 - **Single-tenant.** No support for serving multiple repositories or organizations from one deployment. This is fine for a prototype but bounds claims about scale.
 - **Benchmark dataset is small and in-progress.** The fixture set is being built by hand and is not yet large enough to support strong empirical claims. No result tables are published until the dataset is at a defensible size.
-- **Inline comments are limited to lines in the diff.** Comments are posted with GitHub's `line` and `side` fields, and only for lines that appear in the diff; comments on other lines are listed in the review summary (the first 20, then a count of the rest), since GitHub rejects a whole review if one comment falls outside the diff. The diff-line mapping and the routing in `process_pull_request` are unit-tested with stubbed GitHub and engine objects; posting has not been exercised against the live API in this repository's tests.
+- **Inline comments are limited to lines in the diff.** Comments are posted with GitHub's `line` and `side` fields, and only for lines that appear in the diff; comments on other lines are listed in the review summary (the first 20, then a count of the rest), since GitHub rejects a whole review if one comment falls outside the diff. The summary also lists the scanner's findings and up to 10 style suggestions, each with a count of anything left out. The diff-line mapping and the routing in `process_pull_request` are unit-tested with stubbed GitHub and engine objects; posting has not been exercised against the live API in this repository's tests.
 - **Prompt injection.** Pull-request content is untrusted input placed in the prompt, and the model's output is posted back to the pull request. There is no defense beyond parsing the output as JSON.
 - **Guideline metadata is inferred from file names.** Language comes from the file-name prefix (`python_…`, `typescript_…`) and category from the folder or file name. Both bundled files resolve to `best-practice`, and no stage reads the category yet.
 - **`GuidelineManager` is implemented but not wired into the default RAG pipeline.** The class persists repository-specific guideline overrides to disk, but the runtime path in `main.py` does not currently load repo overrides on top of the bundled defaults. It exists as a forward-compatible hook for the multi-tenant case; integrating it into `RAGSystem.initialize` is a small follow-up.
@@ -192,7 +166,7 @@ For local webhook testing, expose port 8000 via `ngrok http 8000` and configure 
 
 ```bash
 pytest tests/ -v                 # runs offline; no credentials needed
-pytest tests/ --cov=code_review_agent --cov-report=html
+pytest tests/ --cov=code_review_agent --cov-report=term --cov-report=html
 ```
 
 ### Evaluation harness
