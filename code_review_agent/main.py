@@ -220,6 +220,8 @@ def generate_review_summary(
     if outside_diff:
         summary_text += "\n\n### 📍 Comments on lines outside the diff\n\n"
         summary_text += chr(10).join(f"- {c}" for c in outside_diff[:20])
+        if len(outside_diff) > 20:
+            summary_text += f"\n- ...and {len(outside_diff) - 20} more"
 
     if style_suggestions:
         unique = []
@@ -231,6 +233,8 @@ def generate_review_summary(
         if unique:
             summary_text += "\n\n### 💡 Style Suggestions\n\n"
             summary_text += chr(10).join(f"- {s}" for s in unique[:10])
+            if len(unique) > 10:
+                summary_text += f"\n- ...and {len(unique) - 10} more"
 
     if skipped_files:
         summary_text += "\n\n### ⏭️ Files not reviewed\n\n"

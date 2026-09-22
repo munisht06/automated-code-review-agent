@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -15,10 +16,13 @@ logger = logging.getLogger(__name__)
 # made visible twice: a marker in the prompt tells the model, and the
 # FileReviewResult records it for the evaluation report. An earlier 500-char
 # guideline cap removed the Security section of every bundled guideline with
-# no signal anywhere, which is why a cut is never silent now.
+# no signal anywhere, which is why a prompt cut is never silent now.
 MAX_GUIDELINE_CHARS = 4000
 MAX_PATCH_CHARS = 2000
 MAX_FILE_CONTENT_CHARS = 4000
+
+# Characters of each line the static scanner examines.
+MAX_SCAN_LINE_CHARS = 2000
 
 # Number of static-scanner findings passed into the prompt, highest severity first.
 MAX_SCANNER_FINDINGS_IN_PROMPT = 5
@@ -73,12 +77,14 @@ class FileReviewResult:
 
 
 def clip_parts(text: str, limit: int) -> tuple[str, str]:
-    """Cut ``text`` to at most ``limit`` characters, at the last line break
-    when there is one, and return (kept text, truncation marker or "")."""
+    """Cut ``text`` to at most ``limit`` characters and return (kept text,
+    truncation marker or ""). The cut is made at the last line break when
+    that keeps at least half the budget; otherwise (a very long line) it is
+    made at the limit."""
     if len(text) <= limit:
         return text, ""
     cut = text.rfind("\n", 0, limit + 1)
-    kept = text[:cut] if cut > 0 else text[:limit]
+    kept = text[:cut] if cut >= max(1, limit // 2) else text[:limit]
     return kept, f"[... truncated: showing {len(kept)} of {len(text)} characters]"
 
 
@@ -112,10 +118,13 @@ class SecurityScanner:
             (r'token\s*=\s*["\'][^"\']{10,}["\']', "Hardcoded token detected"),
             # A string literal assigned to an AWS secret, not a read from the environment.
             # Assignment, dict entry or quoted YAML value: aws_secret... = "...", "aws_secret...": "...".
-            (r'aws[_-]?secret\w*["\']?\s*[=:]\s*["\'][^"\']{10,}["\']', "AWS credentials detected"),
+            (
+                r'aws[_-]?secret\w{0,40}["\']?\s*[=:]\s*["\'][^"\']{10,}["\']',
+                "AWS credentials detected",
+            ),
         ],
         "sql_injection": [
-            (r'execute\s*\(\s*f["\'].*?\{.*?\}', "Potential SQL injection via f-string"),
+            (r'execute\s*\(\s*f["\'][^{]*\{[^}]*\}', "Potential SQL injection via f-string"),
             # A string literal followed by + inside execute(...), not a + inside the
             # literal. The backreference closes the literal with its own quote, so
             # "... name = '" + name still matches.
@@ -123,28 +132,32 @@ class SecurityScanner:
                 r'execute\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+',
                 "Potential SQL injection via string concatenation",
             ),
-            # A SQL statement built by concatenation, then executed elsewhere.
+            # A SQL statement built by concatenation, then executed elsewhere. The
+            # line must also contain FROM, INTO or SET after the leading keyword, so
+            # UI text such as "Select " + field does not match.
             (
-                r'=\s*(["\'])\s*(SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*\1\s*\+',
+                r'=\s*(["\'])\s*(?:SELECT|INSERT|UPDATE|DELETE)\b(?=.*?\b(?:FROM|INTO|SET)\b)'
+                r"(?:(?!\1).)*\1\s*\+",
                 "SQL query built by string concatenation",
             ),
             (r'query\s*=\s*f["\']SELECT.*?\{', "SQL query with f-string interpolation"),
-            (r"\.format\s*\(.*?\).*?execute", "SQL query with .format() method"),
+            (r"\.format\s*\([^)]*\).*?execute", "SQL query with .format() method"),
         ],
         "command_injection": [
-            (r"os\.system\s*\(.*?\+.*?\)", "Command injection via os.system"),
+            # A + inside the call, allowing one level of nested parentheses.
+            (r"os\.system\s*\((?:[^()+]|\([^()]*\))*\+", "Command injection via os.system"),
             (r"subprocess\.(call|run|Popen)\s*\(.*?shell\s*=\s*True", "Shell injection risk"),
             # Bare eval()/exec() only: not model.eval(), ast.literal_eval(), or regex.exec().
             (r"(?<![\w.])eval\s*\(", "Use of eval() is dangerous"),
             (r"(?<![\w.])exec\s*\(", "Use of exec() is dangerous"),
         ],
         "xss_vulnerability": [
-            (r"innerHTML\s*=\s*.*?\+", "Potential XSS via innerHTML"),
+            (r"innerHTML\s*=[^+]*\+", "Potential XSS via innerHTML"),
             (r"dangerouslySetInnerHTML", "React XSS risk with dangerouslySetInnerHTML"),
             (r"document\.write\s*\(", "XSS risk with document.write"),
         ],
         "path_traversal": [
-            (r'open\s*\(.*?\+.*?["\']\.\.', "Path traversal vulnerability"),
+            (r'open\s*\([^)]*\+\s*["\']\.\.', "Path traversal vulnerability"),
             # A capitalized File constructor (Java, C#, Kotlin) taking a user-derived path.
             # Case-sensitive so read_file(...) and get_profile(...) do not match.
             (r"(?<![\w.])(?-i:File)\s*\([^)]*\buser", "User-controlled file path"),
@@ -165,7 +178,9 @@ class SecurityScanner:
             List of security issues found
         """
         issues = []
-        lines = code.split("\n")
+        # Long lines (minified code) are scanned only up to a fixed length. The
+        # input is untrusted pull-request content, and this bounds the cost.
+        lines = [line[:MAX_SCAN_LINE_CHARS] for line in code.split("\n")]
 
         for vuln_type, patterns in cls.PATTERNS.items():
             for pattern, description in patterns:
@@ -251,8 +266,9 @@ class ReviewEngine:
             provenance needed to audit the result.
         """
         # 1. Run static security scan
-        security_issues = self.security_scanner.scan(
-            file_content, language=RAGSystem._detect_language(filename)
+        # Run in a thread so a slow scan cannot block the service's event loop.
+        security_issues = await asyncio.to_thread(
+            self.security_scanner.scan, file_content, RAGSystem._detect_language(filename)
         )
 
         # 2. Retrieve relevant guidelines using RAG
@@ -397,8 +413,8 @@ Please provide a comprehensive code review in the specified JSON format."""
             number = int(value) if value.is_integer() else None
         elif isinstance(value, int):
             number = value
-        elif isinstance(value, str) and re.fullmatch(r"\s*[0-9]+\s*", value):
-            number = int(value)
+        elif isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+            number = int(value.strip())
         else:
             number = None
         return number if number is not None and number >= 1 else None

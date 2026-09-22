@@ -45,7 +45,9 @@ def _hashed_embedding(text: str) -> list[float]:
 
 class _Embeddings:
     async def create(self, model: str, input: str):  # noqa: A002 (mirrors the SDK signature)
-        return SimpleNamespace(data=[SimpleNamespace(embedding=_hashed_embedding(input))])
+        return SimpleNamespace(
+            model="offline-mock", data=[SimpleNamespace(embedding=_hashed_embedding(input))]
+        )
 
 
 class _Completions:

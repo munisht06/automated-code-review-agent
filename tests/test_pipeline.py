@@ -132,6 +132,10 @@ class TestTruncation:
         cuts = ReviewEngine._prompt_truncations([g], long_patch, long_content)
         assert len(cuts) == 3
 
+    def test_a_long_line_is_cut_at_the_budget(self):
+        kept, marker = re_mod.clip_parts("short\n" + "x" * 100, 50)
+        assert kept == ("short\n" + "x" * 100)[:50] and marker
+
     def test_content_cut_at_a_line_break_with_an_unnumbered_marker(self):
         engine = ReviewEngine.__new__(ReviewEngine)
         lines = [f"line{i:04d}" for i in range(1, 1001)]
@@ -191,6 +195,7 @@ class TestParsing:
                     "summary": "s",
                     "comments": [
                         {"line": "²", "category": "bug"},
+                        {"line": "\u001c5", "category": "bug"},
                         {"line": 0, "category": "bug"},
                         {"line": "-4", "category": "bug"},
                         {"line": 10.0, "category": "bug"},
@@ -200,7 +205,7 @@ class TestParsing:
                 }
             )
         )
-        assert [c.line for c in r.line_comments] == [10, 7]
+        assert [c.line for c in r.line_comments] == [5, 10, 7]
         assert "dropped 4" in r.parse_error
 
     def test_malformed_comment_dropped_and_recorded(self):
@@ -263,6 +268,9 @@ class TestScannerPrecisionGuards:
             ),
             ('query = "SELECT * FROM users WHERE name = \'" + name', "sql_injection"),
             ('creds = {"aws_secret_access_key": "AKIAABCDEFGHIJKLMNOP"}', "hardcoded_secret"),
+            ('os.system(" ".join(args) + " " + user_input)', "command_injection"),
+            ('sql = "SELECT " + ", ".join(cols) + " FROM t WHERE id = " + uid', "sql_injection"),
+            ('q = "UPDATE " + table + " SET name = \'" + name + "\'"', "sql_injection"),
         ],
     )
     def test_flagged(self, code, vuln):
@@ -276,6 +284,59 @@ def test_commentable_lines():
     patch = "@@ -3,4 +3,6 @@\n ctx\n-old\n+new1\n+new2\n ctx2\n\\ No newline at end of file"
     assert commentable_lines(patch) == {3, 4, 5, 6}
     assert commentable_lines("") == set()
+
+
+def test_scanner_ignores_ui_text_and_bounds_long_lines():
+    import time
+
+    for code in ('placeholder = "Select " + field', 'title = "Delete " + item.name'):
+        assert SecurityScanner.scan(code) == []
+    crafted = "\n".join(["aws_secret" * 5000, "open(" + "+" * 50000, ".format(" * 5000])
+    start = time.perf_counter()
+    SecurityScanner.scan(crafted)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_language_boost_orders_retrieval():
+    from code_review_agent import rag_system
+
+    class Embed:
+        async def create(self, model, input):
+            vec = [0.8, 0.6] if input.startswith("Code review") else [1.0, 0.0]
+            if "React" in input:
+                vec = [0.9, 0.1]
+            return MagicMock(model="m", data=[MagicMock(embedding=vec)])
+
+    rag = RAGSystem(client=MagicMock(embeddings=Embed()))
+    ranked = asyncio.run(rag.retrieve_guidelines("a.py", "x = 1"))
+    assert [g.id for g in ranked][0] == "python_best_practices"
+    rag_system.LANGUAGE_MATCH_BOOST, saved = 1.0, rag_system.LANGUAGE_MATCH_BOOST
+    try:
+        ranked = asyncio.run(rag.retrieve_guidelines("a.py", "x = 1"))
+    finally:
+        rag_system.LANGUAGE_MATCH_BOOST = saved
+    assert [g.id for g in ranked][0] == "typescript_react_standards"
+
+
+def test_failed_embedding_call_is_retried_not_half_applied():
+    from code_review_agent.evaluation.mock_llm import MockAzureClient
+
+    client = MockAzureClient()
+    real_create = client.embeddings.create
+    calls = {"n": 0}
+
+    async def flaky(model, input):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated embedding failure")
+        return await real_create(model=model, input=input)
+
+    client.embeddings.create = flaky
+    rag = RAGSystem(client=client)
+    with pytest.raises(RuntimeError):
+        asyncio.run(rag.retrieve_guidelines("a.py", "x = 1"))
+    ranked = asyncio.run(rag.retrieve_guidelines("a.py", "x = 1"))
+    assert {g.id for g in ranked} == {"python_best_practices", "typescript_react_standards"}
 
 
 def test_commentable_lines_uses_hunk_counts():
@@ -408,3 +469,14 @@ def test_process_pull_request_routes_comments(monkeypatch):
     assert "Files not reviewed" in posted["summary"] and "`b.py`" in posted["summary"]
     assert "secret detail" not in posted["summary"]
     assert "gone.py" not in posted["summary"]
+
+
+def test_summary_counts_what_it_leaves_out():
+    from code_review_agent.main import generate_review_summary
+
+    text = generate_review_summary(
+        ["ok"],
+        outside_diff=[f"c{i}" for i in range(25)],
+        style_suggestions=[f"s{i}" for i in range(12)],
+    )
+    assert "...and 5 more" in text and "...and 2 more" in text

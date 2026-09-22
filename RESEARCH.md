@@ -4,7 +4,7 @@ This document gives a research-oriented framing of the Automated Code Review Age
 
 ## The research question
 
-Code review is one of the densest sites of tacit, team-specific engineering knowledge in software practice. Conventions are uneven across teams, often unwritten, and applied unevenly across reviewers. Generic LLMs do not know these conventions and, when prompted to act as reviewers, drift toward generic best-practice feedback or, worse, confidently produce convention-shaped feedback that the team would reject.
+Code review carries a great deal of tacit, team-specific engineering knowledge. Conventions are uneven across teams, often unwritten, and applied unevenly across reviewers. Generic LLMs do not know these conventions and, when prompted to act as reviewers, drift toward generic best-practice feedback or, worse, confidently produce convention-shaped feedback that the team would reject.
 
 The research question this prototype is built around:
 
@@ -22,9 +22,9 @@ The prototype does not aim to settle these questions. It aims to instrument them
 
 Three threads of research come together in this work:
 
-**Retrieval-augmented generation as a grounding mechanism.** Retrieval-augmented generation (RAG) emerged as a way to give language models access to information they were not trained on while preserving the surface fluency of generation. For an applied system, the open question is how grounding behaves when the retrieval corpus is small, hand-authored and deliberately team-specific rather than a large general document store. This prototype is an attempt to study grounding with such a narrow, authoritative corpus.
+**Retrieval-augmented generation as a grounding mechanism.** Retrieval-augmented generation (RAG) gives a language model access, at inference time, to text it was not trained on. For an applied system, the open question is how grounding behaves when the retrieval corpus is small, hand-authored and deliberately team-specific rather than a large general document store. This prototype is an attempt to study grounding with such a narrow, authoritative corpus.
 
-**Reliability and trustworthiness of LLM systems under operating conditions.** A growing research direction studies what happens when LLM-based systems leave the benchmark and meet real workloads: drift between model versions, variance under repeated calls, sensitivity to prompt perturbations, failure modes that compose with retrieval. This project's repeat-consistency metrics, pinned model deployments, and recorded parse failures are meant to make these properties measurable.
+**Reliability and trustworthiness of LLM systems under operating conditions.** One research direction studies what happens when LLM-based systems leave the benchmark and meet real workloads: drift between model versions, variance under repeated calls, sensitivity to prompt perturbations, failure modes that compose with retrieval. This project's repeat-consistency metrics, pinned model deployments, and recorded parse failures are meant to make these properties measurable.
 
 **Decomposing an LLM-driven workflow into stages.** The current prototype makes one LLM call per file. A natural next step, outlined in the README's *Future Work*, is to split the review into stages: a planner that selects which files to look at, a retriever that fetches grounding context, a reviewer that writes the comment, and a verifier that checks the comment against the cited guideline. Today retrieval and review run as one fixed sequence, with no planner or verifier. Splitting the review into stages would make each stage observable and ablatable, so reliability claims could be made per stage rather than for the system as a whole.
 
@@ -62,7 +62,7 @@ It is worth being explicit about scope:
 - It is not a security-research artifact in the static-analysis-research sense; the scanner is a layered-defense complement, not the contribution.
 - It is not a deployed product. It is a research prototype packaged as a webhook service, because the questions concern review as it happens on pull requests.
 
-What it aims to become is narrower: an instrumented, auditable, retrieval-grounded reviewer for one well-bounded developer task, with a methodology specific enough that someone else could reproduce a result on it. Today it is a working prototype and a written evaluation design, with no benchmark results yet.
+What it aims to become is narrower: an instrumented, auditable, retrieval-grounded reviewer for one well-bounded developer task, with a methodology specific enough that someone else could reproduce a result on it. Today it is a prototype and a written evaluation design, with no benchmark results yet.
 
 ---
 

@@ -228,6 +228,43 @@ class TestConsistency:
         ]
         assert compute_consistency(runs).mean_jaccard == pytest.approx(1.0)
 
+    def test_tied_findings_do_not_depend_on_order(self):
+        a = [comment(10, severity="WARNING"), comment(10, severity="CRITICAL")]
+        b = [comment(10, severity="CRITICAL"), comment(10, severity="WARNING")]
+        for first, second in ((a, b), (a, a), (b, a)):
+            c = compute_consistency([[result("a.py", first)], [result("a.py", second)]])
+            assert c.severity_stability == pytest.approx(1.0)
+
+    def test_scores_do_not_depend_on_finding_order(self):
+        from itertools import permutations
+
+        fx = make_fixture(
+            [
+                ExpectedIssue(file="a.py", line=10, category="security", severity="CRITICAL"),
+                ExpectedIssue(file="a.py", line=12, category="security", severity="CRITICAL"),
+                ExpectedIssue(file="a.py", line=12, category="security", severity="SUGGESTION"),
+            ],
+            negatives=[
+                NegativeAssertion(file="a.py", category="security", line=12, line_tolerance=1)
+            ],
+        )
+        scores = set()
+        for order in permutations([8, 7, 15, 11]):
+            m = compute_correctness(fx, [result("a.py", [comment(n) for n in order])])
+            scores.add((m.severity_weighted_recall, len(m.negative_assertion_violations)))
+        assert len(scores) == 1
+        stabilities = {
+            compute_consistency(
+                [
+                    [result("a.py", [comment(n) for n in base])],
+                    [result("a.py", [comment(10)])],
+                    [result("a.py", [comment(12)])],
+                ]
+            ).severity_stability
+            for base in ([7, 13], [13, 7])
+        }
+        assert len(stabilities) == 1
+
     def test_severity_stability_is_one_to_one(self):
         # Only the finding at 10 is the same finding as 11 in the other run.
         runs = [
@@ -272,6 +309,13 @@ class TestCitation:
         checks = compute_citation_checks(fx, run, compute_correctness(fx, run))
         assert checks.retrieved_rate == 1.0
         assert checks.cited_rate == 1.0
+
+    def test_tied_findings_prefer_the_citing_one(self):
+        fx = self.fixture()
+        citing = comment(10, cited=["python_best_practices"])
+        for comments in ([citing, comment(10)], [comment(10), citing]):
+            run = [result("a.py", comments, retrieved=["python_best_practices"])]
+            assert compute_citation_checks(fx, run, compute_correctness(fx, run)).cited_rate == 1.0
 
     def test_retrieved_but_not_cited_is_a_grounding_miss(self):
         fx = self.fixture()
@@ -358,8 +402,8 @@ class TestRunnerOffline:
         assert "python_best_practices" in meta["corpus_guideline_ids"]
         assert set(meta) >= {"git_commit", "git_uncommitted_changes"}
         run0 = report["files_per_run"][0][0]
-        # Both guidelines are retrieved (top_k exceeds the corpus); the
-        # language boost puts the Python one first for a .py file.
+        # Both guidelines are retrieved (top_k exceeds the corpus). The
+        # language boost itself is tested in test_pipeline.py.
         assert run0["retrieved_guideline_ids"][0] == "python_best_practices"
         assert run0["truncated_inputs"] == []
         assert run0["parse_error"] is None and run0["call_error"] is None
@@ -420,6 +464,7 @@ class TestRunnerOffline:
         assert report["failed_runs"] == [0] and report["reference_run"] == 1
         assert report["correctness_per_run"][0] is None
         assert report["correctness_across_runs"]["runs"] == 2
+        assert report["correctness_across_runs"]["scored_runs"] == [1, 2]
         assert report["files_per_run"][0][0]["call_error"].startswith("RuntimeError")
         assert report["consistency"]["excluded_call_failures"] == 1
 
@@ -433,6 +478,19 @@ class TestRunnerOffline:
             == 0
         )
         assert (tmp_path / "r" / "py-sqli-v1.0.json").exists()
+
+    def test_duplicate_and_reserved_fixture_ids_rejected(self, tmp_path):
+        from code_review_agent.evaluation.fixtures import load_fixture_directory
+
+        data = json.loads(FIXTURE_PATH.read_text())
+        (tmp_path / "a.json").write_text(json.dumps(data))
+        (tmp_path / "b.json").write_text(json.dumps(data))
+        with pytest.raises(ValueError, match="Duplicate"):
+            load_fixture_directory(tmp_path)
+        data["fixture_id"] = "summary"
+        (tmp_path / "c.json").write_text(json.dumps(data))
+        with pytest.raises(ValueError):
+            load_fixture(tmp_path / "c.json")
 
     def test_unsafe_fixture_id_rejected(self, tmp_path):
         data = json.loads(FIXTURE_PATH.read_text())

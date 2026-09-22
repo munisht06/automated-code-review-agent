@@ -70,6 +70,8 @@ class RAGSystem:
         self.embeddings_cache: dict[str, list[float]] = {}
         # Where the loaded corpus came from, recorded in evaluation reports.
         self.corpus_source: str | None = None
+        # Model name reported by the embeddings API (the model behind the deployment).
+        self.embedding_response_model: str | None = None
 
     @property
     def client(self):
@@ -196,18 +198,29 @@ class RAGSystem:
         ]
 
     async def _compute_embeddings(self):
-        """Compute embeddings for all guidelines."""
+        """Compute embeddings for all guidelines.
+
+        All-or-nothing: new embeddings are stored only after every call has
+        succeeded. A failure part-way through would otherwise leave some
+        guidelines without an embedding, and retrieval would silently skip
+        them for the rest of the process.
+        """
+        new: dict[str, list[float]] = {}
         for guideline in self.guidelines:
             if guideline.id not in self.embeddings_cache:
-                embedding = await self._get_embedding(f"{guideline.title}\n{guideline.content}")
-                self.embeddings_cache[guideline.id] = embedding
-                guideline.embedding = embedding
+                new[guideline.id] = await self._get_embedding(
+                    f"{guideline.title}\n{guideline.content}"
+                )
+        self.embeddings_cache.update(new)
+        for guideline in self.guidelines:
+            guideline.embedding = self.embeddings_cache[guideline.id]
 
     async def _get_embedding(self, text: str) -> list[float]:
         """Get embedding vector for text using Azure OpenAI."""
         response = await self.client.embeddings.create(
             model=self.embedding_model, input=text[:MAX_EMBEDDING_INPUT_CHARS]
         )
+        self.embedding_response_model = getattr(response, "model", None)
         embedding: list[float] = response.data[0].embedding
         return embedding
 
@@ -218,8 +231,8 @@ class RAGSystem:
         Retrieve most relevant guidelines for the given code context.
         Uses semantic similarity to find applicable guidelines.
         """
-        # Ensure embeddings are computed
-        if not self.embeddings_cache:
+        # Ensure every guideline is embedded (retried if an earlier attempt failed)
+        if not self.guidelines or any(g.embedding is None for g in self.guidelines):
             await self.initialize()
 
         # Build query from code context

@@ -43,6 +43,9 @@ sequenceDiagram
         RE->>SS: scan(file_content)
         SS-->>RE: security findings (regex hits)
         RE->>RAG: retrieve_guidelines(filename, file_content)
+        opt first retrieval
+            RAG->>AOAI: embeddings (each guideline)
+        end
         RAG->>AOAI: embeddings (query)
         AOAI-->>RAG: query embedding
         RAG->>RAG: cosine similarity over guideline embeddings
@@ -70,7 +73,7 @@ The orchestrator owns four responsibilities:
 - HMAC verification of the inbound webhook against `GITHUB_WEBHOOK_SECRET`. Failures return `401` before any computation runs. Verification fails closed: with no secret configured, every request is rejected unless `ALLOW_UNSIGNED_WEBHOOKS` is set for local development.
 - Parsing the PR event payload. Malformed JSON, or a payload missing the repository or pull-request fields, returns `400`. Events other than `pull_request.opened` and `pull_request.synchronize` are acknowledged and ignored.
 - Dispatching the review as a FastAPI `BackgroundTasks` callable, so the webhook responds at once with `200` and `{"status": "processing"}`, well within GitHub's delivery timeout.
-- Driving the per-file review loop. Removed files are skipped. Each file is reviewed inside its own error handler, so one failing file does not abort the others. Comments on lines that appear in the diff are posted as line comments; comments on other lines go into the review summary, because GitHub rejects the entire review if any comment targets a line outside the diff.
+- Driving the per-file review loop. Removed files are skipped. Each file is reviewed inside its own error handler, so one failing file does not abort the others. Comments on lines that appear in the diff are posted as line comments; comments on other lines are listed in the review summary (the first 20, then a count of the rest), because GitHub rejects the entire review if any comment targets a line outside the diff.
 
 Retrieval, inference and GitHub calls are delegated to the components below. The webhook handler is tested with FastAPI's `TestClient` and a stubbed review task, and the review loop in `process_pull_request` with stubbed GitHub and engine objects.
 
@@ -90,12 +93,12 @@ A module-level helper, `commentable_lines(patch)`, returns the new-file line num
 
 ### 3. `SecurityScanner`
 
-A pattern-based static scanner: a catalog of regular expressions, each with a vulnerability class and a short description, matched line by line and case-insensitively. It finds hits, returns structured findings, and does no semantic analysis. It accepts a language argument but does not use it yet: every pattern runs on every file.
+A pattern-based static scanner: a catalog of regular expressions, each with a vulnerability class and a short description, matched line by line and case-insensitively. It finds hits, returns structured findings, and does no semantic analysis. It accepts a language argument but does not use it yet: every pattern runs on every file. Because pull-request content is untrusted, the patterns avoid nested unbounded repetition, each line is scanned only up to 2,000 characters, and the scan runs in a worker thread so it cannot block the service's event loop.
 
 Categories currently covered:
 
 - Hardcoded secrets (string literals assigned to passwords, API keys, tokens and secrets; AWS secret keys in assignments or dict entries)
-- SQL injection (queries built with f-strings, `.format()` or `+` concatenation)
+- SQL injection (queries built with f-strings or `.format()`; `+` concatenation inside `execute(...)`, or onto a literal that starts with a SQL keyword on a line that also contains `FROM`, `INTO` or `SET`)
 - Command injection (bare `eval()` and `exec()` calls, `os.system` with concatenation, `subprocess` with `shell=True`)
 - XSS sinks (`innerHTML` with concatenation, `dangerouslySetInnerHTML`, `document.write`)
 - Path traversal (`open()` with a concatenated `..` path; a `File(...)` constructor taking a user-named variable)
@@ -112,7 +115,7 @@ Severity is assigned by class: SQL injection, command injection and path travers
 
 ### 4. `RAGSystem`
 
-The retrieval layer. It loads every markdown file under `guidelines/` (resolved relative to the package, not the working directory), embeds each file as a single chunk with the deployment named in `AZURE_EMBEDDING_DEPLOYMENT`, and caches the embeddings in memory. At review time it embeds a query built from the file's detected language, its name and its first 1,000 characters, ranks guidelines by cosine similarity, and returns the top *k* (default 3). A guideline whose language matches the file's language gets a 1.3× similarity boost; a guideline's language comes from its file-name prefix (`python_…`, `typescript_…`). Embeddings are computed on first retrieval.
+The retrieval layer. It loads every markdown file under `guidelines/` (resolved relative to the package, not the working directory), embeds each file as a single chunk with the deployment named in `AZURE_EMBEDDING_DEPLOYMENT`, and caches the embeddings in memory. At review time it embeds a query built from the file's detected language, its name and its first 1,000 characters, ranks guidelines by cosine similarity, and returns the top *k* (default 3). A guideline whose language matches the file's language gets a 1.3× similarity boost; a guideline's language comes from its file-name prefix (`python_…`, `typescript_…`). Guideline embeddings are computed on first retrieval, all or nothing: if any embedding call fails, none are stored and the next retrieval tries again, so retrieval never runs over a partly embedded corpus.
 
 If no guideline files are found, the system falls back to five built-in default guidelines, logs a warning, and records the corpus source, which the evaluation harness writes into every report of a run with RAG on.
 
@@ -141,11 +144,11 @@ The LLM is invoked with:
 - `temperature=0.1`, a bias toward consistency. How consistent the outputs actually are at this setting is what the consistency measurement in the [evaluation framework](./EVALUATION.md) is for.
 - A pinned model deployment name. Evaluation runs are not portable across model versions; pin the deployment in `.env` and change the pin only when re-running the full evaluation suite.
 
-The response is parsed with `json.loads` and mapped onto `LineComment` dataclasses. Line numbers given as digit strings or whole floats are accepted and values below 1 are dropped, severity and category are normalized, and comments without a usable line number are dropped and counted in `parse_error`. If the response is not a JSON object, the result has no LLM comments, keeps the scanner findings, and records the error and the raw response, so a parse failure is never read as "no findings". There is no Pydantic schema validation.
+The response is parsed with `json.loads` and mapped onto `LineComment` dataclasses. Line numbers given as digit strings or whole floats are accepted and values below 1 are dropped, severity and category are normalized, and comments without a usable line number are dropped and counted in `parse_error`. If the response is not a JSON object, the result has no LLM comments, keeps the scanner findings, and records the error and the raw response, so a parse failure can be told apart from an empty review. (In evaluation, correctness scoring counts such a run as having no findings; consistency scoring excludes it.) There is no Pydantic schema validation.
 
 ### 6. Evaluation harness (`code_review_agent/evaluation/`)
 
-The evaluation package is independent of the webhook path. It loads PR fixtures from disk, drives the same `ReviewEngine`, `RAGSystem` and `SecurityScanner` used at runtime, and scores the structured output. Each report records the run's configuration (git commit and whether tracked files had uncommitted changes, deployment names, API version, temperature, RAG on/off, repeats, prompt budgets, corpus source) and per-file provenance, including the model name the API reported. A review call that fails is recorded, its run is excluded from scoring, and the harness exits with status 3.
+The evaluation package is independent of the webhook path. It loads PR fixtures from disk, drives the same `ReviewEngine`, `RAGSystem` and `SecurityScanner` used at runtime, and scores the structured output. Each report records the run's configuration (git commit and whether the package, guidelines or fixtures differ from it, deployment names, API version, temperature, RAG on/off, repeats, prompt budgets, corpus source) and per-file provenance, including the model names the chat and embeddings APIs reported. A review call that fails is recorded, its run is excluded from scoring, and the harness exits with status 3.
 
 `--mock-llm` replaces Azure with an offline stand-in: hashed bag-of-words embeddings and a chat stub that echoes the scanner findings in the prompt. It exercises the harness end to end without credentials; its numbers are not model results. No live benchmark results are reported yet. Methodology and metric definitions are in [`EVALUATION.md`](./EVALUATION.md).
 
@@ -182,7 +185,7 @@ The system distinguishes three classes of failure:
 2. **Per-file failure.** Any exception while fetching or reviewing one file (a GitHub API error, non-UTF-8 content, an embedding or LLM failure) is logged with its traceback, and the file is listed under "Files not reviewed" in the summary; the rest of the PR is still reviewed. A model response that fails to parse is not an exception: the result carries `parse_error` and keeps the scanner findings.
 3. **Outer failure.** Any other exception in `process_pull_request` (listing files, constructing the engine, posting the review) is logged with its traceback, and a generic comment is posted on the PR: "⚠️ Code review encountered an error and could not complete. See the service logs for details." Exception details stay in the log rather than in a public comment.
 
-Not implemented: structured logging with per-PR correlation IDs, retries for transient network failures, and run-cost tracking.
+Not implemented: structured logging with per-PR correlation IDs, retries for GitHub API calls, and run-cost tracking. Azure OpenAI calls use the OpenAI SDK's default retries (connection errors, timeouts, rate limits and server errors).
 
 ## Deployment
 

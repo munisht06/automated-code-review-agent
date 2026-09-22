@@ -143,9 +143,14 @@ def load_fixture(path: Path | str) -> Fixture:
     ]
 
     fixture_id = data["fixture_id"]
-    if not isinstance(fixture_id, str) or not _FIXTURE_ID.fullmatch(fixture_id):
+    if (
+        not isinstance(fixture_id, str)
+        or not _FIXTURE_ID.fullmatch(fixture_id)
+        or fixture_id.lower() == "summary"  # reserved: the runner writes summary.md
+    ):
         raise ValueError(
-            f"fixture_id {fixture_id!r} in {p} must use only letters, digits, '_', '.' and '-'"
+            f"fixture_id {fixture_id!r} in {p} must use only letters, digits, '_', '.' and '-', "
+            "and 'summary' is reserved"
         )
 
     return Fixture(
@@ -162,11 +167,19 @@ def load_fixture(path: Path | str) -> Fixture:
 def load_fixture_directory(directory: Path | str) -> list[Fixture]:
     """Load every *.json file in a directory as a fixture."""
     d = Path(directory)
-    fixtures = []
+    fixtures: list[Fixture] = []
+    seen: dict[str, Path] = {}
     for p in sorted(d.glob("*.json")):
         try:
-            fixtures.append(load_fixture(p))
+            fixture = load_fixture(p)
         except (KeyError, ValueError) as e:  # JSONDecodeError is a ValueError
             # Surface schema problems loudly; do not silently skip.
             raise ValueError(f"Failed to load fixture {p}: {e}") from e
+        # Report files are named by fixture_id, so a duplicate would overwrite
+        # another fixture's report (case-insensitively, on macOS and Windows).
+        key = fixture.fixture_id.lower()
+        if key in seen:
+            raise ValueError(f"Duplicate fixture_id {fixture.fixture_id!r} in {p} and {seen[key]}")
+        seen[key] = p
+        fixtures.append(fixture)
     return fixtures

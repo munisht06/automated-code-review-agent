@@ -28,8 +28,9 @@ Usage:
 Each invocation runs one configuration. The ablation is two invocations
 (with and without --no-rag) whose reports are compared.
 
-Exit status: 0 on success; 2 when a live run has no Azure credentials; 3
-when any review call failed. Failed runs are recorded in the report and
+Exit status: 0 on success; 1 when no fixtures are found; 2 when a live run
+has no Azure credentials (argparse also exits with 2 on invalid arguments);
+3 when any review call failed. Failed runs are recorded in the report and
 excluded from scoring, since a failed call is not a model output.
 
 The runner does NOT call GitHub and does NOT depend on the webhook path. It
@@ -50,7 +51,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from code_review_agent import rag_system as rag_mod
 from code_review_agent import review_engine as re_mod
@@ -66,6 +67,9 @@ from .metrics import (
     emit_grounding_tasks,
     summarize_correctness,
 )
+
+# The project root: runner.py -> evaluation -> code_review_agent -> root.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_LIVE_ENV = ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_KEY")
 
@@ -118,17 +122,20 @@ def _git(*cmd: str) -> str | None:
             capture_output=True,
             text=True,
             check=True,
-            cwd=Path(__file__).resolve().parent,
+            cwd=PROJECT_ROOT,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
 
 
 def git_state() -> dict:
-    """The commit the code came from, and whether tracked files differed
-    from it (untracked files, such as reports, are ignored)."""
+    """The commit the code came from, and whether the package, the guideline
+    corpus or the fixtures differ from it, counting new untracked files there.
+    Other paths, such as a reports directory, are ignored."""
     commit = _git("rev-parse", "HEAD")
-    status = _git("status", "--porcelain", "--untracked-files=no")
+    status = _git(
+        "status", "--porcelain", "--", "code_review_agent", "guidelines", "tests/fixtures"
+    )
     return {
         "git_commit": commit.strip() if commit else None,
         "git_uncommitted_changes": None if status is None else bool(status.strip()),
@@ -146,6 +153,7 @@ def run_metadata(args: argparse.Namespace, engine: ReviewEngine, git: dict) -> d
         ),
         "chat_deployment": None if args.mock_llm else engine.deployment,
         "embedding_deployment": None if args.mock_llm else rag.embedding_model,
+        "embedding_model_reported": rag.embedding_response_model,
         "api_version": None if args.mock_llm else rag_mod.azure_api_version(),
         "temperature": re_mod.LLM_TEMPERATURE,
         "rag_enabled": engine.rag_enabled,
@@ -210,7 +218,11 @@ def score_fixture(
         "correctness_per_run": [
             per_run[i].to_dict() if i in per_run else None for i in range(len(runs))
         ],
-        "correctness_across_runs": summarize_correctness([per_run[i] for i in ok]),
+        # Its per_run lists follow scored_runs.
+        "correctness_across_runs": {
+            **summarize_correctness([per_run[i] for i in ok]),
+            "scored_runs": ok,
+        },
         "citation_checks_per_run": [
             citation[i].to_dict() if i in citation else None for i in range(len(runs))
         ],
@@ -429,6 +441,9 @@ def _non_negative_int(value: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A .env in the working directory first, then one found upward from this
+    # package (the repository root). Neither overrides variables already set.
+    load_dotenv(find_dotenv(usecwd=True))
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="Evaluation harness for the Automated Code Review Agent."

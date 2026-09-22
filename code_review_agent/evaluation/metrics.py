@@ -30,6 +30,11 @@ among pairings of that size it takes the one with the smallest total line
 distance. A greedy closest-first pass is not enough: with expected issues at
 lines 10 and 14 and findings at 8 and 11, greedy pairs 11 with 10 and leaves
 8 unmatched, although 8-10 and 11-14 match both.
+
+Remaining ties are broken in favor of a finding that cites the expected
+issue's ``must_cite`` guidelines and, across runs, a finding with the same
+severity. Findings are sorted by content before matching, so no score
+depends on the order in which the model listed them.
 """
 
 from __future__ import annotations
@@ -212,6 +217,28 @@ def _max_matching(edges: dict[tuple[int, int], int]) -> list[tuple[int, int]]:
     return sorted(pair for pair in pairs if pair in edges)
 
 
+def _comment_key(filename: str, c: LineComment) -> tuple:
+    return (
+        filename,
+        c.line,
+        _norm(c.category),
+        (c.severity or "").upper(),
+        tuple(c.cited_guideline_ids),
+        c.issue,
+        c.suggestion,
+    )
+
+
+def _with_tie_break(
+    candidates: dict[tuple[int, int], tuple[int, int]],
+) -> dict[tuple[int, int], int]:
+    """Fold (distance, tie-break) into one integer cost that orders by
+    distance first. The multiplier exceeds any possible sum of tie-break
+    terms, so the tie-break never outweighs a difference in total distance."""
+    scale = len(candidates) + 1
+    return {pair: dist * scale + tie for pair, (dist, tie) in candidates.items()}
+
+
 def compute_correctness(
     fixture: Fixture,
     results: Sequence[FileReviewResult],
@@ -234,11 +261,14 @@ def compute_correctness(
     """
     metrics = CorrectnessMetrics()
 
-    findings: list[tuple[str, LineComment]] = [
-        (result.filename, comment) for result in results for comment in result.line_comments
-    ]
+    # Sorted by content, so the result does not depend on the order in which
+    # the model listed its findings.
+    findings: list[tuple[str, LineComment]] = sorted(
+        ((result.filename, comment) for result in results for comment in result.line_comments),
+        key=lambda fc: _comment_key(*fc),
+    )
 
-    edges: dict[tuple[int, int], int] = {}
+    candidates: dict[tuple[int, int], tuple[int, int]] = {}
     for fi, (fname, comment) in enumerate(findings):
         for ei_idx, ei in enumerate(fixture.expected_issues):
             if (
@@ -246,7 +276,9 @@ def compute_correctness(
                 and _norm(ei.category) == _norm(comment.category)
                 and abs(ei.line - comment.line) <= line_tolerance
             ):
-                edges[(fi, ei_idx)] = abs(ei.line - comment.line)
+                misses_citation = not set(ei.must_cite) <= set(comment.cited_guideline_ids)
+                candidates[(fi, ei_idx)] = (abs(ei.line - comment.line), int(misses_citation))
+    edges = _with_tie_break(candidates)
 
     finding_to_expected = dict(_max_matching(edges))
     matched_expected = set(finding_to_expected.values())
@@ -410,21 +442,23 @@ def compute_consistency(
 
 
 def _findings(run: Sequence[FileReviewResult]) -> list[tuple[str, str, int, str]]:
-    return [
+    # Sorted, so no score depends on the order in which findings were listed.
+    return sorted(
         (result.filename, _norm(c.category), c.line, (c.severity or "").upper())
         for result in run
         for c in result.line_comments
-    ]
+    )
 
 
 def _match(a: list, b: list, tol: int) -> list[tuple[int, int]]:
-    """One-to-one maximum matching of findings by (file, category, |line| <= tol)."""
-    edges: dict[tuple[int, int], int] = {}
-    for i, (fa, ca, la, _sa) in enumerate(a):
-        for j, (fb, cb, lb, _sb) in enumerate(b):
+    """One-to-one maximum matching of findings by (file, category, |line| <= tol),
+    preferring equal severities among equally close pairs."""
+    candidates: dict[tuple[int, int], tuple[int, int]] = {}
+    for i, (fa, ca, la, sa) in enumerate(a):
+        for j, (fb, cb, lb, sb) in enumerate(b):
             if fa == fb and ca == cb and abs(la - lb) <= tol:
-                edges[(i, j)] = abs(la - lb)
-    return _max_matching(edges)
+                candidates[(i, j)] = (abs(la - lb), int(sa != sb))
+    return _max_matching(_with_tie_break(candidates))
 
 
 def _tolerant_jaccard(a: list, b: list, tol: int) -> float:
