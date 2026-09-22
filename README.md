@@ -1,15 +1,15 @@
 # Automated Code Review Agent
 
-> A research prototype for grounded, agentic LLM-based code review on GitHub pull requests.
+> A research prototype for retrieval-grounded LLM code review on GitHub pull requests.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Azure OpenAI](https://img.shields.io/badge/Azure-OpenAI-0078D4.svg)](https://azure.microsoft.com/en-us/products/ai-services)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-This repository accompanies an applied study on whether retrieval-augmented, agentic LLM workflows can deliver code review that is consistent, auditable, and grounded enough to be trustworthy in real software-engineering practice. It is an in-progress prototype, not a polished tool.
+This repository accompanies an applied study on whether retrieval-augmented LLM workflows can deliver code review that is consistent, auditable, and grounded enough to be trustworthy in real software-engineering practice. It is an in-progress prototype, not a polished tool.
 
-For a faculty-facing summary of the research framing, see [`RESEARCH.md`](./RESEARCH.md).
+For the research framing and open questions, see [`RESEARCH.md`](./RESEARCH.md).
 For system design details, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 For evaluation methodology and metrics, see [`EVALUATION.md`](./EVALUATION.md).
 
@@ -112,7 +112,8 @@ Numerical results are not yet committed; the harness is in place, and benchmark 
 
 This is a research prototype, and the limitations matter as much as the design choices.
 
-- **Retrieval surface is one corpus, not two.** The current RAG layer embeds and retrieves over the curated standards corpus in `guidelines/`. It does not retrieve over the surrounding repository — caller and callee files, related modules, recent commit history. Faculty-grade *code-context retrieval* in the strong sense is on the roadmap, not in `main`.
+- **Retrieval surface is one corpus, not two.** The current RAG layer embeds and retrieves over the curated standards corpus in `guidelines/`. It does not retrieve over the surrounding repository — caller and callee files, related modules, recent commit history. *Code-context retrieval* in the strong sense is on the roadmap, not in `main`.
+- **Per-guideline prompt budget.** Each retrieved guideline is capped at 4,000 characters before it enters the prompt. The current corpus fits in full, but a longer guideline would be truncated with no signal in the output. An earlier 500-character cap did exactly that, silently removing the security section of both guidelines, so the SQL-injection fixture never saw the guidance it is meant to cite.
 - **Static scanner is regex-based.** The `SecurityScanner` covers documented patterns (injection, hardcoded secrets, XSS, command injection, path traversal). It will not catch dataflow-dependent vulnerabilities. This is a deliberate trade-off — auditability over coverage — but it bounds what the system can claim about security review.
 - **Per-file processing is sequential.** Within a single PR, files are reviewed in a serial loop. Concurrency is currently per-PR (FastAPI background tasks dispatching different PRs in parallel). Adding bounded per-file concurrency with explicit rate-limit awareness is a planned change.
 - **No queue or back-pressure.** The system uses FastAPI's in-process `BackgroundTasks` for review work. It is not durable; restarts lose in-flight reviews. A real task queue (Celery, dramatiq, or similar) is required for serious deployment but is out of scope for the prototype.
@@ -226,7 +227,7 @@ automated-code-review-agent/
 │   ├── test_review_engine.py      # Unit tests
 │   └── fixtures/prs/              # Evaluation fixtures (in progress)
 ├── ARCHITECTURE.md                # System design notes
-├── RESEARCH.md                    # Faculty-facing research brief
+├── RESEARCH.md                    # Research framing and open questions
 ├── EVALUATION.md                  # Evaluation methodology
 ├── azure-pipelines.yml            # CI/CD pipeline
 ├── Dockerfile                     # Container image
@@ -265,6 +266,6 @@ Munish Tanwar — [mtanwar.com](https://mtanwar.com)
 If this prototype or its evaluation framework informs your own work, please cite the repository. A `CITATION.cff` is provided.
 
 ```
-Tanwar, M. (2025). Automated Code Review Agent: a grounded, agentic LLM workflow
+Tanwar, M. (2025). Automated Code Review Agent: a retrieval-grounded LLM workflow
 for pull-request review. https://github.com/munisht06/automated-code-review-agent
 ```

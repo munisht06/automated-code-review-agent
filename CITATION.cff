@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software or its evaluation framework, please cite as below."
-title: "Automated Code Review Agent: a grounded, agentic LLM workflow for pull-request review"
+title: "Automated Code Review Agent: a retrieval-grounded LLM workflow for pull-request review"
 authors:
   - family-names: "Tanwar"
     given-names: "Munish"
@@ -10,7 +10,7 @@ license: MIT
 type: software
 keywords:
   - retrieval-augmented-generation
-  - agentic-ai
+  - llm-evaluation
   - llm-grounding
   - code-review
   - applied-ai

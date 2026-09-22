@@ -31,11 +31,11 @@ Grounding fidelity is the single hardest property to measure cheaply, because ap
 
 ### 3. RAG ablation
 
-For each fixture, the harness can run the agent in three configurations:
+For each fixture, the harness is designed to run the agent in three configurations. The first two are implemented (`--no-rag` toggles retrieval); the third is planned.
 
 - **Full system** — RAG retrieval + scanner + LLM.
 - **No RAG** — scanner + LLM, with the system prompt stripped of retrieved guidelines.
-- **No scanner** — RAG retrieval + LLM, with the static-scanner findings withheld from the prompt.
+- **No scanner** *(planned, not yet a runner flag)* — RAG retrieval + LLM, with the static-scanner findings withheld from the prompt.
 
 Cross-configuration comparison gives a direct read on how much of the system's correctness depends on each component.
 
@@ -73,7 +73,7 @@ Fixtures live under `tests/fixtures/prs/` and are JSON files with the following 
       "category": "security",
       "severity": "CRITICAL",
       "issue_type": "sql_injection",
-      "must_cite": ["security_best_practices"]
+      "must_cite": ["python_best_practices"]
     }
   ],
   "negative_assertions": [

@@ -17,7 +17,7 @@
       "category": "security",
       "severity": "CRITICAL",
       "issue_type": "sql_injection",
-      "must_cite": ["security_best_practices"]
+      "must_cite": ["python_best_practices"]
     }
   ],
   "negative_assertions": [

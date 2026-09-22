@@ -30,7 +30,7 @@ Three threads of research come together in this work:
 
 ## Why this is interesting to applied AI / NLP research
 
-A faculty reader will recognize the research-direction adjacencies without me having to name them; this section sketches the threads that connect this prototype to active research conversations.
+This section sketches the threads that connect this prototype to active research conversations.
 
 - **Grounding and citation faithfulness.** The hardest problem in retrieval-grounded systems is not whether the model uses the retrieved context but whether it uses it *faithfully* — does the citation actually apply, does the suggestion actually follow from the cited text. The evaluation framework in this repo treats citation faithfulness as a first-class measurable property, not as an emergent hope.
 - **Reliability of LLM-based reasoning over structured developer artifacts.** Code diffs, security-pattern findings, and review payloads are highly structured. They are good substrates for studying whether LLM behavior on structured input is more or less reliable than on unstructured input — a question that comes up across applied NLP and applied AI safety literatures.

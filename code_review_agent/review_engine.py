@@ -6,6 +6,9 @@ from typing import List, Dict, Any, Optional
 from openai import AsyncAzureOpenAI
 from .rag_system import RAGSystem
 
+# Characters of each retrieved guideline included in the system prompt.
+MAX_GUIDELINE_CHARS = 4000
+
 
 @dataclass
 class SecurityIssue:
@@ -187,8 +190,11 @@ class ReviewEngine:
 
     def _build_system_prompt(self, guidelines: List) -> str:
         """Build system prompt with guidelines and output format specification."""
+        # Per-guideline prompt budget. Must exceed the longest guideline in the
+        # corpus: a 500-char cap previously cut off the Security section of every
+        # guideline without any signal in the output.
         guidelines_text = "\n".join([
-            f"## {g.title}\n{g.content[:500]}"  # Truncate for token efficiency
+            f"## {g.title}\n{g.content[:MAX_GUIDELINE_CHARS]}"
             for g in guidelines
         ])
 
