@@ -249,7 +249,8 @@ def compute_correctness(
 
     A finding can match an expected issue iff they have the same file, the
     same category (case-insensitive), and line numbers within
-    ``line_tolerance`` of each other. Matching is one-to-one and maximum (see
+    ``line_tolerance`` of each other, or within the expected issue's own
+    ``line_tolerance`` when it sets one. Matching is one-to-one and maximum (see
     the module docstring): each finding and each expected issue is used at
     most once.
 
@@ -271,10 +272,11 @@ def compute_correctness(
     candidates: dict[tuple[int, int], tuple[int, int]] = {}
     for fi, (fname, comment) in enumerate(findings):
         for ei_idx, ei in enumerate(fixture.expected_issues):
+            tolerance = ei.line_tolerance if ei.line_tolerance is not None else line_tolerance
             if (
                 ei.file == fname
                 and _norm(ei.category) == _norm(comment.category)
-                and abs(ei.line - comment.line) <= line_tolerance
+                and abs(ei.line - comment.line) <= tolerance
             ):
                 misses_citation = not set(ei.must_cite) <= set(comment.cited_guideline_ids)
                 candidates[(fi, ei_idx)] = (abs(ei.line - comment.line), int(misses_citation))

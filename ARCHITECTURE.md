@@ -73,7 +73,7 @@ The orchestrator owns four responsibilities:
 - HMAC verification of the inbound webhook against `GITHUB_WEBHOOK_SECRET`. Failures return `401` before any computation runs. Verification fails closed: with no secret configured, every request is rejected unless `ALLOW_UNSIGNED_WEBHOOKS` is set for local development.
 - Parsing the PR event payload. Malformed JSON, or a payload missing the repository or pull-request fields, returns `400`. Events other than `pull_request.opened` and `pull_request.synchronize` are acknowledged and ignored.
 - Dispatching the review as a FastAPI `BackgroundTasks` callable, so the webhook responds at once with `200` and `{"status": "processing"}`, well within GitHub's delivery timeout.
-- Driving the per-file review loop. Removed files are skipped. Each file is reviewed inside its own error handler, so one failing file does not abort the others. Comments on lines that appear in the diff are posted as line comments; comments on other lines are listed in the review summary (the first 20, then a count of the rest), because GitHub rejects the entire review if any comment targets a line outside the diff. The summary also carries the scanner's findings, each with its file, line, description and recommendation; up to 10 de-duplicated style suggestions; and any file that could not be reviewed.
+- Driving the per-file review loop. Removed files are skipped. Each file is reviewed inside its own error handler, so one failing file does not abort the others. Comments on lines that appear in the diff are posted as line comments; comments on other lines are listed in the review summary (the first 20, then a count of the rest), because GitHub rejects the entire review if any comment targets a line outside the diff. The summary also carries the first 20 of the scanner's findings, each with its file, line, description and recommendation; up to 10 de-duplicated style suggestions; any file whose model response could not be read; and any file that could not be reviewed. Text the model produced is flattened to one line and stripped of the characters that would let it forge a heading or embed a link or image, because pull-request content is untrusted and the summary is posted publicly.
 
 Retrieval, inference and GitHub calls are delegated to the components below. The webhook handler is tested with FastAPI's `TestClient` and a stubbed review task, and the review loop in `process_pull_request` with stubbed GitHub and engine objects.
 
@@ -93,12 +93,12 @@ A module-level helper, `commentable_lines(patch)`, returns the new-file line num
 
 ### 3. `SecurityScanner`
 
-A pattern-based static scanner: a catalog of regular expressions, each with a vulnerability class and a short description, matched line by line and case-insensitively. It finds hits, returns structured findings, and does no semantic analysis. It accepts a language argument but does not use it yet: every pattern runs on every file. Because pull-request content is untrusted, the patterns avoid nested unbounded repetition, each line is scanned only up to 2,000 characters, and the scan runs in a worker thread so it cannot block the service's event loop.
+A pattern-based static scanner: a catalog of regular expressions, each with a vulnerability class and a short description, matched line by line and case-insensitively. It finds hits, returns structured findings, and does no semantic analysis. It accepts a language argument but does not use it yet: every pattern runs on every file. Because pull-request content is untrusted, the patterns avoid nested unbounded repetition, a rule may declare a cheap precondition that is checked before its main pattern runs, each line is scanned only up to 2,000 characters, and the scan runs in a worker thread so it cannot block the service's event loop. A test pins the cost of scanning crafted input.
 
 Categories currently covered:
 
 - Hardcoded secrets (string literals assigned to passwords, API keys, tokens and secrets; AWS secret keys in assignments or dict entries)
-- SQL injection (queries built with f-strings, or with `.format()` on a literal that holds a SQL keyword and a placeholder; `+` concatenation inside `execute(...)`, or onto a literal that starts with a SQL keyword on a line that also contains `FROM`, `INTO` or `SET`)
+- SQL injection (f-strings and `.format()` on a literal that looks like SQL, and `+` concatenation inside `execute(...)`, `executeQuery(...)` or onto a literal that starts with a SQL keyword). Every SQL rule first requires an uppercase clause keyword (`FROM`, `INTO`, `SET`, `VALUES`, `WHERE`) on the line, which is how SQL is written in code and how English prose such as `"Delete {} files from cache"` is kept out. Lowercase SQL is missed; a false CRITICAL on someone's pull request costs more than a miss here.
 - Command injection (bare `eval()` and `exec()` calls, `os.system` with concatenation, `subprocess` with `shell=True`)
 - XSS sinks (`innerHTML` with concatenation, `dangerouslySetInnerHTML`, `document.write`)
 - Path traversal (`open()` with a concatenated `..` path; a `File(...)` constructor taking a user-named variable)
@@ -111,7 +111,7 @@ The scanner complements the LLM rather than replacing it. It runs first, and its
 
 Its precision has not been measured. The tests pin known false-positive cases (`model.eval()`, `ast.literal_eval()`, `read_file(username)`, an AWS key read from the environment) as non-findings.
 
-Severity is assigned by class: SQL injection, command injection and path traversal are `CRITICAL`; hardcoded secrets and XSS are `HIGH`. No current class maps to `MEDIUM` or `LOW`, which exist for classes that may be added. Every finding, not just a count, is listed in the review summary with its location and the pattern's recommendation.
+Severity is assigned by class: SQL injection, command injection and path traversal are `CRITICAL`; hardcoded secrets and XSS are `HIGH`. No current class maps to `MEDIUM` or `LOW`, which exist for classes that may be added. The first 20 findings, ordered by severity then file and line, are listed in the review summary with their location and the pattern's recommendation, followed by a count of the rest.
 
 ### 4. `RAGSystem`
 
@@ -185,7 +185,7 @@ The system distinguishes three classes of failure:
 2. **Per-file failure.** Any exception while fetching or reviewing one file (a GitHub API error, non-UTF-8 content, an embedding or LLM failure) is logged with its traceback, and the file is listed under "Files not reviewed" in the summary; the rest of the PR is still reviewed. A model response that fails to parse is not an exception: the result carries `parse_error` and keeps the scanner findings.
 3. **Outer failure.** Any other exception in `process_pull_request` (listing files, constructing the engine, posting the review) is logged with its traceback, and a generic comment is posted on the PR: "⚠️ Code review encountered an error and could not complete. See the service logs for details." Exception details stay in the log rather than in a public comment.
 
-`/health` returns liveness plus booleans saying whether Azure credentials and a GitHub token are configured and whether webhook signatures are required, so a misconfigured deployment is visible before the first pull request arrives. The booleans say only that a value is set, never what it is.
+`/health` returns liveness plus booleans saying whether Azure credentials and a GitHub token are configured, whether a webhook secret is set, and whether unsigned webhooks are allowed. A deployment with no Azure credentials, or with neither a secret nor `ALLOW_UNSIGNED_WEBHOOKS` (which rejects every delivery with 401), is therefore visible here rather than on the first pull request. The booleans say only that a value is set, never what it is.
 
 Not implemented: structured logging with per-PR correlation IDs, retries for GitHub API calls, and run-cost tracking. Azure OpenAI calls use the OpenAI SDK's default retries (connection errors, timeouts, rate limits and server errors).
 

@@ -647,3 +647,54 @@ class TestProvenanceGuard:
 
         state = git_state()
         assert set(state) == {"git_commit", "git_uncommitted_changes"}
+
+
+class TestPerIssueTolerance:
+    def test_an_expected_issue_can_tighten_its_own_window(self):
+        fx = make_fixture(
+            [
+                ExpectedIssue(
+                    file="a.py",
+                    line=10,
+                    category="bug",
+                    severity="WARNING",
+                    line_tolerance=1,
+                )
+            ]
+        )
+        near = compute_correctness(fx, [result("a.py", [comment(11, category="bug")])])
+        far = compute_correctness(fx, [result("a.py", [comment(13, category="bug")])])
+        assert near.true_positives == 1
+        # Would have been credited by the run's default +/-3 window.
+        assert far.true_positives == 0
+
+
+class TestFixtureLabels:
+    """The labels are the experiment; pin them so an edit is deliberate."""
+
+    def test_sql_fixture(self):
+        fx = load_fixture(FIXTURE_PATH)
+        (issue,) = fx.expected_issues
+        assert (issue.file, issue.line, issue.category, issue.severity) == (
+            "src/users.py",
+            10,
+            "security",
+            "CRITICAL",
+        )
+        assert issue.must_cite == ["python_best_practices"]
+        assert [(n.category, n.line, n.line_tolerance) for n in fx.negative_assertions] == [
+            ("security", 18, 3)
+        ]
+
+    def test_scanner_blind_fixture(self):
+        fx = load_fixture(Path(__file__).parent / "fixtures" / "prs" / "py-silent-except-002.json")
+        (issue,) = fx.expected_issues
+        assert (issue.file, issue.line, issue.category, issue.severity) == (
+            "src/settings.py",
+            10,
+            "bug",
+            "WARNING",
+        )
+        assert issue.must_cite == ["python_best_practices"]
+        # Tight: +/-3 would credit any bug comment anywhere in the function.
+        assert issue.line_tolerance == 1

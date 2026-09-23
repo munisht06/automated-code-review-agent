@@ -103,6 +103,17 @@ def number_lines(text: str) -> str:
     return "\n".join(f"{i:>4} | {line}" for i, line in enumerate(text.split("\n"), start=1))
 
 
+@dataclass(frozen=True)
+class Rule:
+    """One scanner rule: the pattern that flags a line, what to call the
+    finding, and an optional cheap precondition the line must satisfy first.
+    """
+
+    pattern: str
+    description: str
+    requires: str | None = None
+
+
 class SecurityScanner:
     """
     Static security scanner over a fixed catalog of regular expressions
@@ -110,11 +121,26 @@ class SecurityScanner:
     runs on every file.
 
     Patterns are matched line by line and case-insensitively, except where a
-    pattern scopes case sensitivity itself with ``(?-i:...)``.
+    pattern scopes case sensitivity itself with ``(?-i:...)``. The SQL rules
+    do: they require uppercase SQL keywords, the usual convention in code,
+    because lowercase words like "select" and "from" occur in ordinary
+    English and a false CRITICAL is posted on someone's pull request.
     """
 
-    # Security patterns to detect
-    PATTERNS = {
+    # A SQL clause keyword, uppercase. SQL embedded in code is written in
+    # uppercase by convention, and requiring it keeps English prose such as
+    # "Delete {} files from cache" out of the SQL rules. Lowercase SQL is
+    # missed; that is the trade, and a false positive here is posted on
+    # someone's pull request as CRITICAL.
+    #
+    # It is a rule precondition rather than a lookahead inside the pattern:
+    # a lookahead is re-evaluated at every start position, which costs
+    # quadratic time on a long line that never satisfies it.
+    _SQL_CLAUSE = r"(?-i:\b(?:FROM|INTO|SET|VALUES|WHERE)\b)"
+
+    # Security patterns to detect. An entry is a Rule, or a (pattern,
+    # description) pair for a rule with no precondition.
+    PATTERNS: dict[str, list[Rule | tuple[str, str]]] = {
         "hardcoded_secret": [
             (r'password\s*=\s*["\'][^"\']{3,}["\']', "Hardcoded password detected"),
             (r'api[_-]?key\s*=\s*["\'][^"\']{10,}["\']', "Hardcoded API key detected"),
@@ -128,39 +154,53 @@ class SecurityScanner:
             ),
         ],
         "sql_injection": [
-            (r'execute\s*\(\s*f["\'][^{]*\{[^}]*\}', "Potential SQL injection via f-string"),
+            (
+                r'execute(?:Query|Update)?\s*\(\s*f["\'][^{]*\{[^}]*\}',
+                "Potential SQL injection via f-string",
+            ),
             # A string literal followed by + inside execute(...), not a + inside the
             # literal. The backreference closes the literal with its own quote, so
             # "... name = '" + name still matches.
             (
-                r'execute\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+',
+                r'execute(?:Query|Update)?\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+',
                 "Potential SQL injection via string concatenation",
             ),
             # A SQL statement built by concatenation, then executed elsewhere. The
             # line must also contain FROM, INTO or SET after the leading keyword, so
             # UI text such as "Select " + field does not match.
-            (
-                r'=\s*(["\'])\s*(?:SELECT|INSERT|UPDATE|DELETE)\b(?=.*?\b(?:FROM|INTO|SET)\b)'
-                r"(?:(?!\1).)*\1\s*\+",
+            Rule(
+                r'=\s*(["\'])\s*(?-i:SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*\1\s*\+',
                 "SQL query built by string concatenation",
+                requires=_SQL_CLAUSE,
             ),
-            (r'query\s*=\s*f["\']SELECT.*?\{', "SQL query with f-string interpolation"),
+            # Any f-string that looks like a SQL statement and interpolates a
+            # value, whatever the variable is called. Keying off a variable
+            # named "query" would make the rule depend on naming.
+            Rule(
+                r'f["\'][^"\'{]{0,200}(?-i:SELECT|INSERT|UPDATE|DELETE)\b[^"\'{]{0,200}\{',
+                "SQL query with f-string interpolation",
+                requires=_SQL_CLAUSE,
+            ),
             # A SQL statement with a {} placeholder, formatted with .format(),
             # whether or not execute() appears on the same line. The lookahead
             # requires a second SQL keyword, so log lines such as
             # "Update {} done".format(name) do not match, and the character
             # classes exclude the brace so the pattern cannot backtrack.
-            (
-                r'["\'][^"\'{]*\b(?:SELECT|INSERT|UPDATE|DELETE)\b'
-                r'(?=[^"\']*\b(?:FROM|INTO|SET|VALUES)\b)'
-                r'[^"\'{]*\{[^"\']*?["\']\s*\.\s*format\s*\(',
+            Rule(
+                r'["\'][^"\'{]{0,200}(?-i:SELECT|INSERT|UPDATE|DELETE)\b'
+                r'[^"\'{]{0,200}\{[^"\']{0,200}?["\']\s*\.\s*format\s*\(',
                 "SQL query built with .format()",
+                requires=_SQL_CLAUSE,
             ),
         ],
         "command_injection": [
             # A + inside the call, allowing one level of nested parentheses.
             (r"os\.system\s*\((?:[^()+]|\([^()]*\))*\+", "Command injection via os.system"),
-            (r"subprocess\.(call|run|Popen)\s*\(.*?shell\s*=\s*True", "Shell injection risk"),
+            (
+                r"subprocess\.(?:call|run|Popen|check_output|check_call)\s*\([^\n]*?"
+                r"shell\s*=\s*True",
+                "Shell injection risk",
+            ),
             # Bare eval()/exec() only: not model.eval(), ast.literal_eval(), or regex.exec().
             (r"(?<![\w.])eval\s*\(", "Use of eval() is dangerous"),
             (r"(?<![\w.])exec\s*\(", "Use of exec() is dangerous"),
@@ -172,9 +212,11 @@ class SecurityScanner:
         ],
         "path_traversal": [
             (r'open\s*\([^)]*\+\s*["\']\.\.', "Path traversal vulnerability"),
-            # A capitalized File constructor (Java, C#, Kotlin) taking a user-derived path.
-            # Case-sensitive so read_file(...) and get_profile(...) do not match.
-            (r"(?<![\w.])(?-i:File)\s*\([^)]*\buser", "User-controlled file path"),
+            # A capitalized File constructor (Java, C#, Kotlin) taking a user-derived
+            # path. Case-sensitive so read_file(...) and get_profile(...) do not
+            # match, and no quote may precede the variable, so
+            # System.getProperty("user.home") does not either.
+            (r"(?<![\w.])(?-i:File)\s*\([^)\"']*\buser", "User-controlled file path"),
         ],
     }
 
@@ -196,16 +238,19 @@ class SecurityScanner:
         # input is untrusted pull-request content, and this bounds the cost.
         lines = [line[:MAX_SCAN_LINE_CHARS] for line in code.split("\n")]
 
-        for vuln_type, patterns in cls.PATTERNS.items():
-            for pattern, description in patterns:
+        for vuln_type, rules in cls.PATTERNS.items():
+            for entry in rules:
+                rule = entry if isinstance(entry, Rule) else Rule(*entry)
                 for i, line in enumerate(lines, start=1):
-                    if re.search(pattern, line, re.IGNORECASE):
+                    if rule.requires and not re.search(rule.requires, line):
+                        continue
+                    if re.search(rule.pattern, line, re.IGNORECASE):
                         issues.append(
                             {
                                 "type": vuln_type,
                                 "severity": cls._get_severity(vuln_type),
                                 "line": i,
-                                "description": description,
+                                "description": rule.description,
                                 "code_snippet": line.strip(),
                                 "recommendation": cls._get_recommendation(vuln_type),
                             }

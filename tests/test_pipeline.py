@@ -267,6 +267,13 @@ class TestScannerPrecisionGuards:
             'print("Update {} done".format(name))',
             'log.info("insert {} items".format(n))',
             'raise ValueError("Cannot delete {} while selected".format(x))',
+            'logger.info("Delete {} files from cache?".format(n))',
+            'label = "Select {} files from your computer".format(limit)',
+            'String t = "Select " + kind + " from the list";',
+            'msg = "Delete " + str(n) + " items from the cart"',
+            'new File(System.getProperty("user.home"))',
+            'new File(System.getProperty("user.dir"), "cache")',
+            "subprocess.run(cmd, shell=False)",
         ],
     )
     def test_not_flagged(self, code):
@@ -291,6 +298,9 @@ class TestScannerPrecisionGuards:
             ('q = "UPDATE " + table + " SET name = \'" + name + "\'"', "sql_injection"),
             ('cursor.execute("SELECT * FROM t WHERE id = {}".format(uid))', "sql_injection"),
             ('q = "SELECT * FROM t WHERE id = {}".format(uid)', "sql_injection"),
+            ('stmt.executeQuery("SELECT * FROM t WHERE id = " + id)', "sql_injection"),
+            ('subprocess.check_output("ls " + path, shell=True)', "command_injection"),
+            ("subprocess.check_call(cmd, shell=True)", "command_injection"),
         ],
     )
     def test_flagged(self, code, vuln):
@@ -595,8 +605,16 @@ def test_health_reports_whether_the_service_is_configured(monkeypatch):
     assert body["status"] == "healthy"
     assert body["azure_openai_configured"] is False
     assert body["github_token_configured"] is False
-    assert body["webhook_signature_required"] is True
+    # No secret and unsigned webhooks off: every delivery is rejected, and the
+    # health payload says so instead of reporting a bare "signatures required".
+    assert body["webhook_secret_configured"] is False
+    assert body["unsigned_webhooks_allowed"] is False
     assert not any("key" in str(v).lower() for v in body.values())  # no secrets echoed
+
+    monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", "s3cret")
+    configured = TestClient(main.app).get("/health").json()
+    assert configured["webhook_secret_configured"] is True
+    assert "s3cret" not in json.dumps(configured)
 
 
 # ---- corpus ids ------------------------------------------------------------------
@@ -609,3 +627,104 @@ def test_guideline_ids_keep_subfolders_distinct(tmp_path):
     rag = RAGSystem(guidelines_path=tmp_path)
     asyncio.run(rag._load_guidelines())
     assert sorted(g.id for g in rag.guidelines) == ["security/python", "style/python"]
+
+
+def test_scanner_stays_fast_on_crafted_lines():
+    import time
+
+    crafted = [
+        '"' + "SELECT " * 286,
+        '"SELECT {' * 250,
+        '"SELECT * FROM t WHERE {} AND ' * 60,
+        "os.system(" + "a(b)" * 400,
+        '"' * 2000,
+        "a" * 2000,
+    ]
+    code = "\n".join(line[:2000] for line in crafted for _ in range(20))
+    start = time.perf_counter()
+    SecurityScanner.scan(code)
+    # 120 crafted 2,000-character lines. Untrusted input must not be able to
+    # make the scan expensive; a regression here means a pattern backtracks.
+    assert time.perf_counter() - start < 2.0
+
+
+def test_review_file_records_the_file_on_scanner_findings():
+    from code_review_agent.evaluation.mock_llm import MockAzureClient
+
+    engine = ReviewEngine(client=MockAzureClient())
+    content = 'import db\nq = f"SELECT * FROM t WHERE id = {x}"\n'
+    result = asyncio.run(engine.review_file("src/users.py", "", content))
+    assert result.security_issues
+    assert {i.file for i in result.security_issues} == {"src/users.py"}
+
+
+def test_corpus_loads_in_a_stable_order(tmp_path):
+    for name in ("zebra.md", "alpha.md", "middle.md"):
+        (tmp_path / name).write_text(f"# {name}\n- rule\n")
+    rag = RAGSystem(guidelines_path=tmp_path)
+    asyncio.run(rag._load_guidelines())
+    assert [g.id for g in rag.guidelines] == ["alpha", "middle", "zebra"]
+
+
+# ---- model text is untrusted -----------------------------------------------------
+
+
+class TestModelTextIsNeutralized:
+    def test_markdown_breakout_is_defused(self):
+        from code_review_agent.main import sanitize_model_text
+
+        hostile = (
+            "No issues\n\n---\n# Security review: APPROVED "
+            "![beacon](https://attacker.example/b.png) [click](https://attacker.example)"
+        )
+        safe = sanitize_model_text(hostile)
+        assert "\n" not in safe
+        assert not safe.startswith(("#", "-", ">"))
+        assert "![" not in safe and "](" not in safe
+
+    def test_long_text_is_cut(self):
+        from code_review_agent.main import MAX_MODEL_TEXT_CHARS, sanitize_model_text
+
+        out = sanitize_model_text("x" * (MAX_MODEL_TEXT_CHARS + 100))
+        assert len(out) <= MAX_MODEL_TEXT_CHARS + 3 and out.endswith("...")
+
+    def test_a_hostile_summary_cannot_forge_a_heading_in_the_review(self, monkeypatch):
+        from code_review_agent import github_client, main
+        from code_review_agent import review_engine as engine_mod
+
+        posted = {}
+
+        class FakeGitHub:
+            def __init__(self, token):
+                pass
+
+            async def get_pr_files(self, repo, pr_number):
+                return [
+                    {"filename": "a.py", "status": "modified", "patch": "@@ -1,1 +1,2 @@\n a\n+b"}
+                ]
+
+            async def get_file_content(self, repo, path, sha):
+                return "a\nb\n"
+
+            async def create_pr_review(self, repo, pr_number, commit_sha, comments, summary):
+                posted["summary"] = summary
+
+            async def create_pr_comment(self, repo, pr_number, body):
+                posted["error"] = body
+
+        class FakeEngine:
+            async def review_file(self, filename, patch, file_content):
+                return FileReviewResult(
+                    filename=filename,
+                    summary="ok\n\n---\n# Security review: APPROVED ![x](https://attacker.example)",
+                    parse_error="dropped 1 malformed comment(s)",
+                )
+
+        monkeypatch.setattr(github_client, "GitHubClient", FakeGitHub)
+        monkeypatch.setattr(engine_mod, "ReviewEngine", FakeEngine)
+        asyncio.run(main.process_pull_request("o/r", 1, "sha"))
+
+        body = posted["summary"]
+        assert "\n# Security review" not in body and "![x]" not in body
+        # A file whose response did not parse is named, not left anonymous.
+        assert "could not be read" in body and "`a.py`" in body

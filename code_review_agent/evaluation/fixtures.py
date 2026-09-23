@@ -19,7 +19,8 @@ Schema (mirrored in EVALUATION.md):
       "expected_issues": [
         {"file": "...", "line": <int>, "category": "...",
          "severity": "...", "issue_type": "...",
-         "must_cite": ["guideline_id", ...]}
+         "must_cite": ["guideline_id", ...],
+         "line_tolerance": <int, optional: overrides the run's tolerance>}
       ],
       "negative_assertions": [
         {"file": "...", "category": "...", "rationale": "...",
@@ -58,6 +59,10 @@ class ExpectedIssue:
     severity: str  # "CRITICAL" | "WARNING" | "SUGGESTION"
     issue_type: str | None = None  # finer-grained class, e.g. "sql_injection"
     must_cite: list[str] = field(default_factory=list)
+    # Overrides the run's line tolerance for this issue. A tight window is
+    # what keeps a fixture from crediting any comment anywhere in the
+    # function that happens to share the category.
+    line_tolerance: int | None = None
 
 
 @dataclass
@@ -127,6 +132,9 @@ def load_fixture(path: Path | str) -> Fixture:
             severity=ei["severity"],
             issue_type=ei.get("issue_type"),
             must_cite=list(ei.get("must_cite", [])),
+            line_tolerance=(
+                int(ei["line_tolerance"]) if ei.get("line_tolerance") is not None else None
+            ),
         )
         for ei in data.get("expected_issues", [])
     ]

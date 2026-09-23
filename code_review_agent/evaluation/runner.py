@@ -266,8 +266,8 @@ def caveats(meta: dict) -> list[str]:
         )
     if not meta.get("rag_enabled"):
         notes.append(
-            "RAG is off: no guidelines reach the prompt, so citation rates are 0 by "
-            "construction."
+            "RAG is off: no guidelines reach the prompt, so citation rates are 0 "
+            "wherever they are defined at all."
         )
     return notes
 

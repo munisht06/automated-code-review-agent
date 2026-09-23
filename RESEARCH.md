@@ -12,7 +12,7 @@ The research question this prototype is built around:
 
 Three subsidiary questions follow from this and shape the system's design:
 
-1. *How much does retrieval grounding actually reduce hallucinated review feedback on team-specific conventions, relative to a non-grounded baseline?* To be measured through a RAG-on / RAG-off ablation on labeled fixtures; [`EVALUATION.md`](./EVALUATION.md) §3 lists what the current corpus and fixture cannot yet separate.
+1. *How much does retrieval grounding actually reduce hallucinated review feedback on team-specific conventions, relative to a non-grounded baseline?* To be measured through a RAG-on / RAG-off ablation on labeled fixtures; [`EVALUATION.md`](./EVALUATION.md) §3 lists what the current corpus and fixtures cannot yet separate.
 2. *How does layering deterministic static analysis underneath LLM-based review change the reliability of the system as a whole?* To be measured by comparing scanner-only, LLM-only, and composed configurations on held-out fixtures. The harness has a RAG switch today; the scanner-off switch is planned.
 3. *Can structured output and prompt-level constraints make LLM-generated review feedback consistent enough across repeat runs to be regression-tested?* Measurable through repeat-run variance metrics on a fixed fixture.
 
