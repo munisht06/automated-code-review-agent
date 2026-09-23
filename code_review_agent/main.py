@@ -129,7 +129,9 @@ async def process_pull_request(repo: str, pr_number: int, commit_sha: str):
                 skipped_files.append(filename)
                 continue
 
-            if review_result.parse_error:
+            # A response that parsed but lost a malformed comment is not an
+            # unreadable response: dropped_comments records that separately.
+            if review_result.parse_error and not review_result.dropped_comments:
                 unreadable_files.append(filename)
 
             # GitHub rejects the whole review if any comment targets a line
@@ -214,10 +216,17 @@ MAX_MODEL_TEXT_CHARS = 500
 
 
 def sanitize_model_text(text: str, limit: int = MAX_MODEL_TEXT_CHARS) -> str:
-    """Make model-supplied text safe to render inside a review body."""
+    """Make model-supplied text safe to render inside a review body.
+
+    GitHub renders a safelist of HTML inside markdown, so ``<`` is escaped
+    too: an ``<img>`` in a public review body is a tracking pixel aimed at
+    everyone who opens the pull request.
+    """
     flattened = " ".join(str(text).split())
     flattened = _MARKDOWN_BREAKOUT.sub("", flattened)
-    flattened = flattened.replace("![", "! [").replace("](", "] (").replace("`", "'")
+    flattened = (
+        flattened.replace("<", "&lt;").replace("![", "! [").replace("](", "] (").replace("`", "'")
+    )
     if len(flattened) > limit:
         flattened = flattened[:limit].rstrip() + "..."
     return flattened

@@ -70,6 +70,8 @@ class FileReviewResult:
     retrieved_guideline_ids: list[str] = field(default_factory=list)
     truncated_inputs: list[str] = field(default_factory=list)
     parse_error: str | None = None
+    # Comments dropped while parsing an otherwise readable response.
+    dropped_comments: int = 0
     raw_response: str | None = None
     # Model name reported in the API response (the model behind the deployment).
     response_model: str | None = None
@@ -154,16 +156,18 @@ class SecurityScanner:
             ),
         ],
         "sql_injection": [
-            (
+            Rule(
                 r'execute(?:Query|Update)?\s*\(\s*f["\'][^{]*\{[^}]*\}',
                 "Potential SQL injection via f-string",
+                requires=_SQL_CLAUSE,
             ),
             # A string literal followed by + inside execute(...), not a + inside the
             # literal. The backreference closes the literal with its own quote, so
             # "... name = '" + name still matches.
-            (
+            Rule(
                 r'execute(?:Query|Update)?\s*\(\s*(["\'])(?:(?!\1).)*\1\s*\+',
                 "Potential SQL injection via string concatenation",
+                requires=_SQL_CLAUSE,
             ),
             # A SQL statement built by concatenation, then executed elsewhere. The
             # line must also contain FROM, INTO or SET after the leading keyword, so
@@ -553,6 +557,7 @@ Please provide a comprehensive code review in the specified JSON format."""
                 security_issues=sec_issues,
                 style_suggestions=[str(s) for s in style],
                 parse_error=(f"dropped {dropped} malformed comment(s)" if dropped else None),
+                dropped_comments=dropped,
                 raw_response=raw,
             )
 

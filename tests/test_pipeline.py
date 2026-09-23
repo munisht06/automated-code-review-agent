@@ -274,6 +274,15 @@ class TestScannerPrecisionGuards:
             'new File(System.getProperty("user.home"))',
             'new File(System.getProperty("user.dir"), "cache")',
             "subprocess.run(cmd, shell=False)",
+            'job_queue.execute(f"job-{job_id}-retry")',
+            'remote_shell.execute("cd " + directory)',
+            'await conn.execute(f"PRAGMA user_version = {version}")',
+            'msg = "DELETE pressed" + suffix',
+            'title = "SELECT ALL" + n',
+            'tpl = "UPDATE available {}".format(v)',
+            'note = f"INSERT here {x}"',
+            # Lowercase SQL is missed on purpose: see the scanner docstring.
+            'q = "SELECT * from t where id = " + uid',
         ],
     )
     def test_not_flagged(self, code):
@@ -301,6 +310,7 @@ class TestScannerPrecisionGuards:
             ('stmt.executeQuery("SELECT * FROM t WHERE id = " + id)', "sql_injection"),
             ('subprocess.check_output("ls " + path, shell=True)', "command_injection"),
             ("subprocess.check_call(cmd, shell=True)", "command_injection"),
+            ('stmt.executeQuery(f"SELECT * FROM t WHERE id = {id}")', "sql_injection"),
         ],
     )
     def test_flagged(self, code, vuln):
@@ -582,13 +592,17 @@ def test_high_severity_findings_are_listed_too():
     from code_review_agent.review_engine import SecurityIssue
 
     issues = [
-        SecurityIssue("hardcoded_secret", "HIGH", 7, "Hardcoded token detected", "Use env vars"),
-        SecurityIssue("sql_injection", "CRITICAL", 4, "SQL injection", "Parameterize"),
+        SecurityIssue(
+            "hardcoded_secret", "HIGH", 1, "Hardcoded token", "Use env vars", file="a.py"
+        ),
+        SecurityIssue(
+            "sql_injection", "CRITICAL", 99, "SQL injection", "Parameterize", file="z.py"
+        ),
     ]
     text = generate_review_summary(["note"], issues)
-    # Highest severity first, and both findings survive with their locations.
+    # Severity decides the order: the CRITICAL is last by file and by line.
     assert text.index("sql_injection") < text.index("hardcoded_secret")
-    assert "line 7" in text and "Use env vars" in text
+    assert "line 1" in text and "Use env vars" in text
 
 
 def test_health_reports_whether_the_service_is_configured(monkeypatch):
@@ -610,6 +624,10 @@ def test_health_reports_whether_the_service_is_configured(monkeypatch):
     assert body["webhook_secret_configured"] is False
     assert body["unsigned_webhooks_allowed"] is False
     assert not any("key" in str(v).lower() for v in body.values())  # no secrets echoed
+
+    monkeypatch.setattr(main, "ALLOW_UNSIGNED_WEBHOOKS", True)
+    dev = TestClient(main.app).get("/health").json()
+    assert dev["unsigned_webhooks_allowed"] is True
 
     monkeypatch.setattr(main, "GITHUB_WEBHOOK_SECRET", "s3cret")
     configured = TestClient(main.app).get("/health").json()
@@ -681,6 +699,13 @@ class TestModelTextIsNeutralized:
         assert "\n" not in safe
         assert not safe.startswith(("#", "-", ">"))
         assert "![" not in safe and "](" not in safe
+        assert "`" not in safe
+
+    def test_html_is_escaped_because_github_renders_it(self):
+        from code_review_agent.main import sanitize_model_text
+
+        safe = sanitize_model_text('ok <img src="https://attacker.example/p.png" width="1">')
+        assert "<img" not in safe and "&lt;img" in safe
 
     def test_long_text_is_cut(self):
         from code_review_agent.main import MAX_MODEL_TEXT_CHARS, sanitize_model_text
@@ -708,16 +733,28 @@ class TestModelTextIsNeutralized:
 
             async def create_pr_review(self, repo, pr_number, commit_sha, comments, summary):
                 posted["summary"] = summary
+                posted["comments"] = comments
 
             async def create_pr_comment(self, repo, pr_number, body):
                 posted["error"] = body
+
+        hostile = (
+            "ok\n\n---\n# Security review: APPROVED ![x](https://attacker.example) "
+            '<img src="https://attacker.example/p.png" width="1">'
+        )
 
         class FakeEngine:
             async def review_file(self, filename, patch, file_content):
                 return FileReviewResult(
                     filename=filename,
-                    summary="ok\n\n---\n# Security review: APPROVED ![x](https://attacker.example)",
+                    summary=hostile,
+                    line_comments=[
+                        LineComment(2, "WARNING", "bug", hostile, hostile),
+                        LineComment(99, "WARNING", "bug", hostile, hostile),
+                    ],
+                    style_suggestions=[hostile],
                     parse_error="dropped 1 malformed comment(s)",
+                    dropped_comments=1,
                 )
 
         monkeypatch.setattr(github_client, "GitHubClient", FakeGitHub)
@@ -725,6 +762,58 @@ class TestModelTextIsNeutralized:
         asyncio.run(main.process_pull_request("o/r", 1, "sha"))
 
         body = posted["summary"]
-        assert "\n# Security review" not in body and "![x]" not in body
-        # A file whose response did not parse is named, not left anonymous.
-        assert "could not be read" in body and "`a.py`" in body
+        rendered = body + json.dumps(posted["comments"])
+        # Nothing the model wrote can forge a section, a link or an image,
+        # in the summary, the outside-diff list, a style suggestion or a
+        # line comment.
+        assert "\n# Security review" not in rendered
+        assert "![x]" not in rendered and "<img" not in rendered
+        assert "line 99" in body  # the out-of-diff comment was listed
+        # A response that parsed but lost one comment is not "unreadable".
+        assert "could not be read" not in body
+
+    def test_a_file_whose_response_did_not_parse_is_named(self, monkeypatch):
+        from code_review_agent import github_client, main
+        from code_review_agent import review_engine as engine_mod
+
+        posted = {}
+
+        class FakeGitHub:
+            def __init__(self, token):
+                pass
+
+            async def get_pr_files(self, repo, pr_number):
+                return [
+                    {
+                        "filename": "broken.py",
+                        "status": "modified",
+                        "patch": "@@ -1 +1,2 @@\n a\n+b",
+                    },
+                    {"filename": "fine.py", "status": "modified", "patch": "@@ -1 +1,2 @@\n a\n+b"},
+                ]
+
+            async def get_file_content(self, repo, path, sha):
+                return "a\nb\n"
+
+            async def create_pr_review(self, repo, pr_number, commit_sha, comments, summary):
+                posted["summary"] = summary
+
+            async def create_pr_comment(self, repo, pr_number, body):
+                posted["error"] = body
+
+        class FakeEngine:
+            async def review_file(self, filename, patch, file_content):
+                if filename == "broken.py":
+                    return FileReviewResult(
+                        filename=filename,
+                        summary="Review completed with parsing errors.",
+                        parse_error="JSONDecodeError: Expecting value",
+                    )
+                return FileReviewResult(filename=filename, summary="fine")
+
+        monkeypatch.setattr(github_client, "GitHubClient", FakeGitHub)
+        monkeypatch.setattr(engine_mod, "ReviewEngine", FakeEngine)
+        asyncio.run(main.process_pull_request("o/r", 1, "sha"))
+
+        section = posted["summary"].split("could not be read")[1]
+        assert "`broken.py`" in section and "`fine.py`" not in section
