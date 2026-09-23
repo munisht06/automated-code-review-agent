@@ -152,6 +152,19 @@ class TestTruncation:
         prompt = engine._build_user_prompt("a.py", "", "import db\nx = 1", [])
         assert "   2 | x = 1" in prompt
 
+    def test_scanner_findings_in_the_prompt_are_ordered(self):
+        engine = ReviewEngine.__new__(ReviewEngine)
+        findings = [
+            {"line": 30, "description": "critical later", "severity": "CRITICAL"},
+            {"line": 4, "description": "critical earlier", "severity": "CRITICAL"},
+            {"line": 2, "description": "high", "severity": "HIGH"},
+        ]
+        prompt = engine._build_user_prompt("a.py", "", "x = 1", findings)
+        # Severity first, then line: a CRITICAL on line 30 outranks a HIGH on line 2.
+        assert (
+            prompt.index("critical earlier") < prompt.index("critical later") < prompt.index("high")
+        )
+
     def test_no_rag_prompt_says_no_guidelines(self):
         engine = ReviewEngine.__new__(ReviewEngine)
         assert "No guidelines are provided" in engine._build_system_prompt([])
@@ -251,6 +264,9 @@ class TestScannerPrecisionGuards:
             'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
             'label = "Select one".format()',
             'msg = "Deleted {} rows".format(n)',
+            'print("Update {} done".format(name))',
+            'log.info("insert {} items".format(n))',
+            'raise ValueError("Cannot delete {} while selected".format(x))',
         ],
     )
     def test_not_flagged(self, code):
@@ -526,6 +542,29 @@ def test_get_pr_files_follows_pagination(monkeypatch):
 
 
 # ---- summary and health ---------------------------------------------------------
+
+
+def test_scanner_findings_keep_their_file_and_order():
+    from code_review_agent.main import MAX_SCANNER_FINDINGS_IN_SUMMARY, generate_review_summary
+    from code_review_agent.review_engine import SecurityIssue
+
+    issues = [
+        SecurityIssue("sql_injection", "CRITICAL", 40, "second in a.py", "Fix", file="a.py"),
+        SecurityIssue("sql_injection", "CRITICAL", 5, "first in a.py", "Fix", file="a.py"),
+        SecurityIssue("sql_injection", "CRITICAL", 1, "only in b.py", "Fix", file="b.py"),
+    ]
+    text = generate_review_summary(["note"], issues)
+    assert "`a.py` line 5" in text and "`b.py` line 1" in text
+    # Same severity: grouped by file, then ordered by line.
+    assert text.index("first in a.py") < text.index("second in a.py") < text.index("only in b.py")
+
+    many = [
+        SecurityIssue("eval", "HIGH", i, f"finding {i}", "Fix", file="a.py")
+        for i in range(MAX_SCANNER_FINDINGS_IN_SUMMARY + 3)
+    ]
+    capped = generate_review_summary(["note"], many)
+    assert capped.count("- **[HIGH]") == MAX_SCANNER_FINDINGS_IN_SUMMARY
+    assert "...and 3 more" in capped
 
 
 def test_high_severity_findings_are_listed_too():

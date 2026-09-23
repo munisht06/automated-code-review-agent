@@ -39,6 +39,9 @@ class SecurityIssue:
     line: int
     description: str
     recommendation: str
+    # The file the scanner found it in, so a finding stays identifiable once
+    # findings from several files are collected into one review summary.
+    file: str = ""
 
 
 @dataclass
@@ -142,10 +145,15 @@ class SecurityScanner:
                 "SQL query built by string concatenation",
             ),
             (r'query\s*=\s*f["\']SELECT.*?\{', "SQL query with f-string interpolation"),
-            # A SQL literal with a {} placeholder, formatted with .format(),
-            # whether or not execute() appears on the same line.
+            # A SQL statement with a {} placeholder, formatted with .format(),
+            # whether or not execute() appears on the same line. The lookahead
+            # requires a second SQL keyword, so log lines such as
+            # "Update {} done".format(name) do not match, and the character
+            # classes exclude the brace so the pattern cannot backtrack.
             (
-                r'["\'][^"\']*\b(?:SELECT|INSERT|UPDATE|DELETE)\b[^"\']*\{[^"\']*["\']\s*\.\s*format\s*\(',
+                r'["\'][^"\'{]*\b(?:SELECT|INSERT|UPDATE|DELETE)\b'
+                r'(?=[^"\']*\b(?:FROM|INTO|SET|VALUES)\b)'
+                r'[^"\'{]*\{[^"\']*?["\']\s*\.\s*format\s*\(',
                 "SQL query built with .format()",
             ),
         ],
@@ -447,6 +455,7 @@ Please provide a comprehensive code review in the specified JSON format."""
                 line=issue["line"],
                 description=issue["description"],
                 recommendation=issue["recommendation"],
+                file=filename,
             )
             for issue in security_issues
         ]

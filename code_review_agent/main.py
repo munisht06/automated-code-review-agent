@@ -214,12 +214,13 @@ def generate_review_summary(
         # description: a count alone cannot be audited or acted on.
         ranked = sorted(
             security_issues,
-            key=lambda i: (_SEVERITY_ORDER.get(i.severity, 99), i.line),
+            key=lambda i: (_SEVERITY_ORDER.get(i.severity, 99), i.file, i.line),
         )
         summary_text += "### 🚨 Static scanner findings\n\n"
         for issue in ranked[:MAX_SCANNER_FINDINGS_IN_SUMMARY]:
+            where = f"`{issue.file}` line {issue.line}" if issue.file else f"line {issue.line}"
             summary_text += (
-                f"- **[{issue.severity}] {issue.type}** line {issue.line}: "
+                f"- **[{issue.severity}] {issue.type}** {where}: "
                 f"{issue.description}. {issue.recommendation}\n"
             )
         if len(ranked) > MAX_SCANNER_FINDINGS_IN_SUMMARY:
